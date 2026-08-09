@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AAST Bank — Portal</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+  <!-- ===== Header / bank branding ===== -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">AB</div>
+      <div>
+        <h1>AAST Bank</h1>
+        <p class="tagline">Smart ATM Network &mdash; Operations Portal</p>
+      </div>
+    </div>
+    <nav class="nav">
+      <a class="nav-link active" href="/">Dashboard</a>
+      <a class="nav-link" href="/admin">Cardholder Admin</a>
+    </nav>
+  </header>
+
+  <main class="container">
+
+    <!-- ===== Summary cards ===== -->
+    <section class="stats">
+      <div class="stat-card">
+        <span class="stat-label">Total Accounts</span>
+        <span class="stat-value" id="stat-accounts">&mdash;</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">Total Deposits Held</span>
+        <span class="stat-value" id="stat-balance">&mdash;</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">Locked Cards</span>
+        <span class="stat-value" id="stat-locked">&mdash;</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">Transactions Logged</span>
+        <span class="stat-value" id="stat-txns">&mdash;</span>
+      </div>
+    </section>
+
+    <div class="grid">
+
+      <!-- ===== Accounts table ===== -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Customer Accounts</h2>
+          <span class="live-dot" title="Refreshing every 2 seconds">LIVE</span>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Card UID</th>
+              <th class="right">Balance</th>
+              <th class="center">Status</th>
+            </tr>
+          </thead>
+          <tbody id="accounts-body">
+            <tr><td colspan="4" class="empty">Loading&hellip;</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ===== Live transaction feed ===== -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Live Transactions</h2>
+          <span class="live-dot" title="Refreshing every 2 seconds">LIVE</span>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Card / Name</th>
+              <th class="right">Amount</th>
+              <th class="right">Time</th>
+            </tr>
+          </thead>
+          <tbody id="txn-body">
+            <tr><td colspan="4" class="empty">Loading&hellip;</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+    </div>
+  </main>
+
+  <footer class="footer">
+    AAST Bank &mdash; Smart ATM university project. Data served from
+    <code>atm.db</code>; ATM activity arrives over the UART serial link.
+  </footer>
+
+<script>
+// ===========================================================================
+// The whole page is just two fetch() calls on a 2 second timer.
+// ===========================================================================
+
+const REFRESH_MS = 2000;
+
+/** Format a whole-EGP number like 2000 -> "EGP 2,000" */
+function money(value) {
+  return "EGP " + Number(value).toLocaleString("en-US");
+}
+
+/** Turn "2026-08-09T14:03:11" into a short readable time. */
+function shortTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;                 // fall back to the raw string
+  return d.toLocaleTimeString("en-GB", { hour12: false }) +
+         "  " + d.toLocaleDateString("en-GB");
+}
+
+/** Escape text before putting it in the page (safety habit). */
+function esc(text) {
+  return String(text).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+/** Friendly label + colour class for each transaction type. */
+const TXN_STYLE = {
+  WDR:  { label: "Withdrawal",  cls: "tag-wdr"  },
+  DEP:  { label: "Deposit",     cls: "tag-dep"  },
+  PIN:  { label: "PIN Change",  cls: "tag-pin"  },
+  LOCK: { label: "Card Locked", cls: "tag-lock" }
+};
+
+// --- Accounts table ---------------------------------------------------------
+async function loadAccounts() {
+  const res = await fetch("/api/accounts");
+  const accounts = await res.json();
+  const body = document.getElementById("accounts-body");
+
+  if (accounts.length === 0) {
+    body.innerHTML = '<tr><td colspan="4" class="empty">No accounts yet.</td></tr>';
+  } else {
+    body.innerHTML = accounts.map(a => `
+      <tr>
+        <td class="strong">${esc(a.name)}</td>
+        <td class="mono">${esc(a.uid)}</td>
+        <td class="right mono">${money(a.balance)}</td>
+        <td class="center">
+          <span class="badge ${a.locked ? "badge-locked" : "badge-open"}">
+            ${a.locked ? "Locked" : "Open"}
+          </span>
+        </td>
+      </tr>`).join("");
+  }
+
+  // Update the summary cards from the same data.
+  document.getElementById("stat-accounts").textContent = accounts.length;
+  document.getElementById("stat-balance").textContent =
+      money(accounts.reduce((sum, a) => sum + a.balance, 0));
+  document.getElementById("stat-locked").textContent =
+      accounts.filter(a => a.locked).length;
+}
+
+// --- Transaction feed -------------------------------------------------------
+async function loadTransactions() {
+  const res = await fetch("/api/transactions?limit=50");
+  const txns = await res.json();
+  const body = document.getElementById("txn-body");
+
+  if (txns.length === 0) {
+    body.innerHTML = '<tr><td colspan="4" class="empty">No activity yet. ' +
+                     'Waiting for the ATM&hellip;</td></tr>';
+  } else {
+    body.innerHTML = txns.map(t => {
+      const style = TXN_STYLE[t.type] || { label: t.type, cls: "tag-other" };
+      // PIN and LOCK events are not money, so show a dash instead of 0.
+      const amountCell = (t.type === "WDR" || t.type === "DEP")
+            ? money(t.amount || 0) : "&mdash;";
+      const who = t.name ? `${esc(t.name)} <span class="mono dim">(${esc(t.uid)})</span>`
+                         : `<span class="mono">${esc(t.uid)}</span>`;
+      return `
+        <tr>
+          <td><span class="tag ${style.cls}">${style.label}</span></td>
+          <td>${who}</td>
+          <td class="right mono">${amountCell}</td>
+          <td class="right dim small">${esc(shortTime(t.timestamp))}</td>
+        </tr>`;
+    }).join("");
+  }
+
+  document.getElementById("stat-txns").textContent = txns.length;
+}
+
+/** Refresh both panels; ignore a failed poll so the timer keeps running. */
+async function refreshAll() {
+  try {
+    await Promise.all([loadAccounts(), loadTransactions()]);
+  } catch (err) {
+    console.error("Refresh failed:", err);
+  }
+}
+
+refreshAll();                          // first load, immediately
+setInterval(refreshAll, REFRESH_MS);   // then every 2 seconds
+</script>
+</body>
+</html>

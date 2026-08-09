@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AAST Bank — Cardholder Admin</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+  <!-- ===== Header / bank branding ===== -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">AB</div>
+      <div>
+        <h1>AAST Bank</h1>
+        <p class="tagline">Cardholder Administration &mdash; Staff Only</p>
+      </div>
+    </div>
+    <nav class="nav">
+      <a class="nav-link" href="/">Dashboard</a>
+      <a class="nav-link active" href="/admin">Cardholder Admin</a>
+    </nav>
+  </header>
+
+  <main class="container">
+
+    <!-- Feedback message after every admin action. -->
+    <div class="toast" id="toast"></div>
+
+    <!-- ===== Add a new cardholder ===== -->
+    <section class="panel" style="margin-bottom:22px">
+      <div class="panel-head"><h2>Issue New Card</h2></div>
+
+      <form id="add-form">
+        <div class="form-grid">
+          <div class="field">
+            <label for="f-uid">Card UID</label>
+            <input id="f-uid" name="uid" placeholder="A1B2C3D4" required>
+            <span class="hint">4&ndash;16 hex characters</span>
+          </div>
+          <div class="field">
+            <label for="f-name">Cardholder Name</label>
+            <input id="f-name" name="name" placeholder="Amro" required>
+            <span class="hint">Letters only</span>
+          </div>
+          <div class="field">
+            <label for="f-pin">PIN</label>
+            <input id="f-pin" name="pin" placeholder="1234" maxlength="4" required>
+            <span class="hint">Exactly 4 digits</span>
+          </div>
+          <div class="field">
+            <label for="f-balance">Opening Balance</label>
+            <input id="f-balance" name="balance" type="number" min="0" value="0" required>
+            <span class="hint">Whole EGP</span>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Create Account</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- ===== Manage existing cardholders ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Existing Cardholders</h2>
+        <span class="live-dot">LIVE</span>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Card UID</th>
+            <th>PIN</th>
+            <th class="right">Balance</th>
+            <th class="center">Status</th>
+            <th class="center">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="admin-body">
+          <tr><td colspan="6" class="empty">Loading&hellip;</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    Admin actions write straight to <code>atm.db</code>. They are separate from
+    the ATM's serial path, but both share the same database.
+  </footer>
+
+<script>
+// ===========================================================================
+// Admin page: add / edit / delete cardholders through the JSON API.
+// ===========================================================================
+
+const REFRESH_MS = 2000;
+
+function money(v) { return "EGP " + Number(v).toLocaleString("en-US"); }
+
+function esc(text) {
+  return String(text).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+/** Show a green (ok) or red (error) message at the top of the page. */
+let toastTimer = null;
+function toast(message, isError) {
+  const box = document.getElementById("toast");
+  box.textContent = message;
+  box.className = "toast " + (isError ? "error" : "ok");
+  box.style.display = "block";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { box.style.display = "none"; }, 4000);
+}
+
+/** Small wrapper around fetch that understands our {ok, error} responses. */
+async function apiCall(url, method, body) {
+  const options = { method, headers: { "Content-Type": "application/json" } };
+  if (body) options.body = JSON.stringify(body);
+  const res = await fetch(url, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ("Request failed (" + res.status + ")"));
+  return data;
+}
+
+// --- Load the table ---------------------------------------------------------
+async function loadAccounts() {
+  const accounts = await (await fetch("/api/accounts")).json();
+  const body = document.getElementById("admin-body");
+
+  if (accounts.length === 0) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">No cardholders yet.</td></tr>';
+    return;
+  }
+
+  body.innerHTML = accounts.map(a => `
+    <tr>
+      <td class="strong">${esc(a.name)}</td>
+      <td class="mono">${esc(a.uid)}</td>
+      <td class="mono dim">${esc(a.pin)}</td>
+      <td class="right mono">${money(a.balance)}</td>
+      <td class="center">
+        <span class="badge ${a.locked ? "badge-locked" : "badge-open"}">
+          ${a.locked ? "Locked" : "Open"}
+        </span>
+      </td>
+      <td class="center" style="white-space:nowrap">
+        <button class="btn-small" data-action="balance" data-uid="${esc(a.uid)}">Edit Balance</button>
+        <button class="btn-small ${a.locked ? "" : "btn-warn"}"
+                data-action="lock" data-uid="${esc(a.uid)}" data-locked="${a.locked}">
+          ${a.locked ? "Unlock" : "Lock"}
+        </button>
+        <button class="btn-small btn-danger" data-action="delete"
+                data-uid="${esc(a.uid)}" data-name="${esc(a.name)}">Delete</button>
+      </td>
+    </tr>`).join("");
+}
+
+// --- Add a cardholder -------------------------------------------------------
+document.getElementById("add-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.target;
+
+  const payload = {
+    uid:     form.uid.value.trim().toUpperCase(),
+    name:    form.name.value.trim(),
+    pin:     form.pin.value.trim(),
+    balance: parseInt(form.balance.value, 10) || 0
+  };
+
+  try {
+    await apiCall("/api/accounts", "POST", payload);
+    toast(`Card ${payload.uid} issued to ${payload.name}.`, false);
+    form.reset();
+    form.balance.value = 0;
+    loadAccounts();
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
+// --- Edit / lock / delete ---------------------------------------------------
+// One click handler on the table body handles all three buttons
+// (the rows are rebuilt every 2s, so per-button listeners would be lost).
+document.getElementById("admin-body").addEventListener("click", async (event) => {
+  const btn = event.target.closest("button");
+  if (!btn) return;
+
+  const uid = btn.dataset.uid;
+
+  try {
+    if (btn.dataset.action === "balance") {
+      const value = prompt(`New balance for card ${uid} (whole EGP):`);
+      if (value === null) return;                       // user pressed Cancel
+      await apiCall("/api/accounts/" + uid, "PUT",
+                    { balance: parseInt(value, 10) });
+      toast(`Balance updated for ${uid}.`, false);
+
+    } else if (btn.dataset.action === "lock") {
+      const nowLocked = btn.dataset.locked === "1";
+      await apiCall("/api/accounts/" + uid, "PUT",
+                    { locked: nowLocked ? 0 : 1 });
+      toast(`Card ${uid} ${nowLocked ? "unlocked" : "locked"}.`, false);
+
+    } else if (btn.dataset.action === "delete") {
+      if (!confirm(`Delete cardholder ${btn.dataset.name} (${uid})?`)) return;
+      await apiCall("/api/accounts/" + uid, "DELETE");
+      toast(`Card ${uid} deleted.`, false);
+    }
+    loadAccounts();
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
+loadAccounts();                         // first load
+setInterval(loadAccounts, REFRESH_MS);  // keep in sync with the ATM
+</script>
+</body>
+</html>
