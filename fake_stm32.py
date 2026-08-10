@@ -73,11 +73,34 @@ EXAMPLES = [
 # over a socket, a virtual COM port, or a real cable to the STM32.
 # ===========================================================================
 
+class LinkBusy(Exception):
+    """Raised when the socket port is already taken by another simulator."""
+
+
 def open_socket_link(quiet=False):
     """Act as a tiny TCP server and wait for serial_listener.py to connect."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((SOCKET_HOST, SOCKET_PORT))
+
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        # Windows only. Without this, a SECOND copy of this program is allowed
+        # to bind the same port and will silently steal the listener's
+        # connection from the first copy - which looks like the ATM simply
+        # hanging. This makes the second copy fail immediately instead.
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        # Linux/Mac: lets the port be reused straight after a restart.
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    try:
+        server.bind((SOCKET_HOST, SOCKET_PORT))
+    except OSError as err:
+        server.close()
+        raise LinkBusy(
+            f"Port {SOCKET_PORT} is already in use ({err}).\n"
+            f"Another atm_gui.py, atm_sim.py or fake_stm32.py is probably still\n"
+            f"running. Close it and try again."
+        ) from None
+
     server.listen(1)
 
     if not quiet:
@@ -192,7 +215,11 @@ def prompt_loop(send_line, read_line):
 
 
 def main():
-    send_line, read_line, close, how = connect(sys.argv[1:])
+    try:
+        send_line, read_line, close, how = connect(sys.argv[1:])
+    except LinkBusy as err:
+        print(f"\n{err}\n")
+        return
     print_banner(how)
     try:
         prompt_loop(send_line, read_line)

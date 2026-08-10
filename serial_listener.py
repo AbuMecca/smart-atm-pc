@@ -49,6 +49,24 @@ def log(direction, text):
     print(f"  {direction} {text}", flush=True)
 
 
+def mirror(state, detail, uid=None, name=None, amount=0):
+    """Tell the dashboard what the ATM appears to be doing.
+
+    This ONLY feeds the "Live ATM Monitor" panel on the website. It never
+    changes the reply we send back to the STM32, and it never decides
+    anything. If this function failed completely, the ATM would still work
+    exactly the same — which is why the whole call is wrapped in try/except.
+
+    We work the state out from the messages the board already sends, so the
+    protocol stays exactly as it was: a GET means a card was tapped, a
+    TXN:WDR means cash is being dispensed, a LOCK means the card was blocked.
+    """
+    try:
+        database.set_atm_state(state, detail, uid, name, amount)
+    except Exception as err:
+        print(f"  !! could not update the monitor: {err}", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # The protocol itself
 # ---------------------------------------------------------------------------
@@ -77,8 +95,23 @@ def handle_line(line):
                 return "ERR"
             uid = parts[1].upper()
             account = database.get_account(uid)
+
             if account is None:
-                return "NONE"             # unknown card is NONE, not ERR
+                # Unknown card is NONE, not ERR.
+                mirror("UNKNOWN_CARD", f"Unknown card {uid} - refused", uid=uid)
+                return "NONE"
+
+            if account["locked"]:
+                mirror("CARD_BLOCKED",
+                       f"Blocked card presented: {account['name']}",
+                       uid=uid, name=account["name"])
+            else:
+                # A GET means a card was just tapped on the reader. The STM32
+                # will now ask the customer for a PIN.
+                mirror("CARD_READ",
+                       f"Card inserted: {account['name']} - awaiting PIN",
+                       uid=uid, name=account["name"])
+
             return (f"REC:{account['name']}:{account['pin']}:"
                     f"{account['balance']}:{account['locked']}")
 
@@ -97,8 +130,18 @@ def handle_line(line):
                 return "ERR"
 
             # Store the balance the STM32 already worked out. No maths here.
+            account = database.get_account(uid)
             database.set_balance(uid, new_balance)
             database.add_transaction(uid, txn_type, amount)
+
+            # A TXN can only happen after the STM32 accepted the PIN, so the
+            # monitor can safely show this as an authorised customer.
+            if txn_type == "WDR":
+                mirror("TXN_WDR", f"Dispensing EGP {amount:,}",
+                       uid=uid, name=account["name"], amount=amount)
+            else:
+                mirror("TXN_DEP", f"Accepting deposit of EGP {amount:,}",
+                       uid=uid, name=account["name"], amount=amount)
             return "OK"
 
         # --- PIN:<uid>:<newpin> --------------------------------------------
@@ -112,8 +155,11 @@ def handle_line(line):
             if database.get_account(uid) is None:
                 return "ERR"
 
+            account = database.get_account(uid)
             database.set_pin(uid, new_pin)
             database.add_transaction(uid, "PIN", 0)
+            mirror("PIN_CHANGED", f"PIN changed for {account['name']}",
+                   uid=uid, name=account["name"])
             return "OK"
 
         # --- LOCK:<uid> -----------------------------------------------------
@@ -124,8 +170,11 @@ def handle_line(line):
             if database.get_account(uid) is None:
                 return "ERR"
 
+            account = database.get_account(uid)
             database.lock_account(uid)
             database.add_transaction(uid, "LOCK", 0)
+            mirror("LOCKED", f"Card locked: {account['name']}",
+                   uid=uid, name=account["name"])
             return "OK"
 
         # Anything else is not part of the contract.
@@ -247,6 +296,7 @@ def main():
         port = args[args.index("--port") + 1]
 
     database.init_db()   # make sure the tables exist
+    mirror("IDLE", "Idle - waiting for card")   # reset the dashboard monitor
 
     print("=" * 62)
     print(" AAST Bank - Smart ATM serial listener")

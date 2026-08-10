@@ -20,6 +20,7 @@ Run with:  python app.py     ->  http://localhost:5000
 """
 
 import re
+from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request
 
@@ -57,10 +58,13 @@ def validate_new_account(uid, name, pin, balance):
 # ---------------------------------------------------------------------------
 
 @app.route("/")
-def portal():
-    """Main dashboard. The tables are filled in by JavaScript, not by Jinja,
-    because they need to refresh every 2 seconds."""
-    return render_template("portal.html")
+def dashboard():
+    """Bank operations dashboard + live ATM monitor.
+
+    The tables are filled in by JavaScript rather than by Jinja, because they
+    refresh every second without reloading the page.
+    """
+    return render_template("dashboard.html")
 
 
 @app.route("/admin")
@@ -162,6 +166,53 @@ def api_get_transactions():
         limit = 50
     limit = max(1, min(limit, 500))  # keep it sensible
     return jsonify(database.get_transactions(limit))
+
+
+# ---------------------------------------------------------------------------
+# JSON API — the live ATM monitor
+# ---------------------------------------------------------------------------
+
+# If nothing has arrived from the STM32 for this long, the ATM has clearly
+# finished serving whoever was there, so the monitor drops back to "Idle".
+IDLE_AFTER_SECONDS = 25
+
+
+@app.route("/api/atm_state", methods=["GET"])
+def api_atm_state():
+    """What the ATM appears to be doing right now.
+
+    DISPLAY ONLY. This route just reports the state the serial listener wrote
+    down as messages arrived from the board. Nothing here controls the ATM.
+    """
+    state = database.get_atm_state()
+    if state is None:
+        return jsonify({"state": "IDLE", "detail": "Idle - waiting for card",
+                        "uid": None, "name": None, "amount": 0,
+                        "seconds_ago": 0})
+
+    # How long ago was this written? Used both to fade back to idle and to
+    # show "3s ago" on the dashboard.
+    seconds_ago = 0
+    try:
+        written = datetime.fromisoformat(state["updated"])
+        seconds_ago = max(0, int((datetime.now() - written).total_seconds()))
+    except (ValueError, TypeError):
+        pass
+
+    # An old event means the customer has gone; show the machine as idle
+    # again. We do not rewrite the database here — the dashboard simply
+    # displays it as idle, and the real last event stays in the log.
+    if seconds_ago > IDLE_AFTER_SECONDS and state["state"] != "IDLE":
+        state = dict(state)
+        state["state"] = "IDLE"
+        state["detail"] = "Idle - waiting for card"
+        state["uid"] = None
+        state["name"] = None
+        state["amount"] = 0
+
+    result = dict(state)
+    result["seconds_ago"] = seconds_ago
+    return jsonify(result)
 
 
 if __name__ == "__main__":

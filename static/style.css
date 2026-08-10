@@ -83,6 +83,115 @@ body {
 /* Stack the two panels on narrow screens. */
 @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
 
+/* ==========================================================================
+   LIVE ATM MONITOR
+   A mirror of what the STM32 is doing. The colour of the whole panel comes
+   from a state class (.s-idle, .s-cash, ...) that JavaScript swaps in.
+   ========================================================================== */
+
+.monitor {
+  background: #fff;
+  border: 1px solid var(--grey-200);
+  border-left: 6px solid var(--grey-500);   /* the state colour */
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  margin-bottom: 22px;
+  overflow: hidden;
+  transition: border-color .25s;
+}
+
+.monitor-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 20px;
+  background: var(--navy-900);
+  color: #fff;
+}
+.monitor-head h2 { margin: 0; font-size: 15.5px; font-weight: 600; }
+.monitor-note {
+  font-size: 11px; letter-spacing: .5px; text-transform: uppercase;
+  color: #8fa8cc;
+}
+
+.monitor-body {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 20px 22px;
+}
+@media (max-width: 860px) {
+  .monitor-body { flex-direction: column; align-items: stretch; text-align: center; }
+}
+
+/* The big round lamp on the left. */
+.atm-lamp {
+  width: 72px; height: 72px;
+  flex: 0 0 72px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--grey-200);
+  color: var(--grey-500);
+  font-size: 30px;
+  transition: background .25s, color .25s;
+}
+@media (max-width: 860px) { .atm-lamp { margin: 0 auto; } }
+
+.monitor-text { flex: 1 1 auto; min-width: 0; }
+
+.monitor-state {
+  font-size: 22px; font-weight: 700; letter-spacing: .6px;
+  color: var(--navy-800);
+}
+.monitor-detail { font-size: 15px; color: var(--ink); margin-top: 2px; }
+.monitor-meta {
+  margin-top: 8px;
+  display: flex; gap: 14px; flex-wrap: wrap;
+  font-size: 12.5px; color: var(--grey-500);
+  font-family: Consolas, "Courier New", monospace;
+}
+@media (max-width: 860px) { .monitor-meta { justify-content: center; } }
+
+/* A small mock-up of the ATM's own LCD. */
+.atm-screen {
+  flex: 0 0 220px;
+  background: #0b2016;
+  border: 3px solid #061a10;
+  border-radius: 8px;
+  padding: 12px 14px;
+  text-align: center;
+}
+.atm-screen-label {
+  font-size: 9.5px; letter-spacing: 1.4px;
+  color: #3f7f57; margin-bottom: 6px;
+}
+.atm-screen-text {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 15px; font-weight: 700; line-height: 1.45;
+  color: #7CFFA0;
+}
+
+/* --- One colour per state. Only the lamp and the left border change. --- */
+.monitor.s-idle   { border-left-color: #8b9bb0; }
+.monitor.s-idle   .atm-lamp { background: #eef1f6; color: #8b9bb0; }
+
+.monitor.s-active { border-left-color: var(--blue-500); }
+.monitor.s-active .atm-lamp { background: #e4eeff; color: var(--blue-500); }
+
+.monitor.s-ok     { border-left-color: var(--green-ok); }
+.monitor.s-ok     .atm-lamp { background: #e6f4ec; color: var(--green-ok); }
+
+.monitor.s-cash   { border-left-color: #0d8f8f; }
+.monitor.s-cash   .atm-lamp { background: #e0f5f5; color: #0d8f8f;
+                              animation: blink 1s ease-in-out infinite; }
+
+.monitor.s-warn   { border-left-color: var(--amber); }
+.monitor.s-warn   .atm-lamp { background: #fdf3e2; color: var(--amber); }
+
+.monitor.s-danger { border-left-color: var(--red); }
+.monitor.s-danger .atm-lamp { background: #fdecea; color: var(--red);
+                              animation: blink 1s ease-in-out infinite; }
+
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
 /* ---------- Summary cards ---------- */
 .stats {
   display: grid;

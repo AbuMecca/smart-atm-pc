@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AAST Bank — Portal</title>
+  <title>AAST Bank — Operations Dashboard</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -14,7 +14,7 @@
       <div class="logo">AB</div>
       <div>
         <h1>AAST Bank</h1>
-        <p class="tagline">Smart ATM Network &mdash; Operations Portal</p>
+        <p class="tagline">Smart ATM Network &mdash; Operations Dashboard</p>
       </div>
     </div>
     <nav class="nav">
@@ -24,6 +24,40 @@
   </header>
 
   <main class="container">
+
+    <!-- ================================================================
+         LIVE ATM MONITOR
+         A mirror of what the STM32 is doing, worked out from the serial
+         messages it sends. Display only - it cannot control the ATM.
+         ================================================================ -->
+    <section class="monitor" id="monitor">
+      <div class="monitor-head">
+        <h2>Live ATM Monitor</h2>
+        <span class="monitor-note">Mirrors the STM32 &mdash; display only</span>
+      </div>
+
+      <div class="monitor-body">
+        <!-- The big lamp that changes colour with the state -->
+        <div class="atm-lamp" id="atm-lamp">
+          <span class="lamp-icon" id="lamp-icon">&#9679;</span>
+        </div>
+
+        <div class="monitor-text">
+          <div class="monitor-state" id="monitor-state">IDLE</div>
+          <div class="monitor-detail" id="monitor-detail">Idle &mdash; waiting for card</div>
+          <div class="monitor-meta">
+            <span id="monitor-card">No card present</span>
+            <span class="monitor-age" id="monitor-age"></span>
+          </div>
+        </div>
+
+        <!-- A tiny picture of the ATM's own screen -->
+        <div class="atm-screen">
+          <div class="atm-screen-label">ATM DISPLAY</div>
+          <div class="atm-screen-text" id="atm-screen-text">PLEASE INSERT<br>YOUR CARD</div>
+        </div>
+      </div>
+    </section>
 
     <!-- ===== Summary cards ===== -->
     <section class="stats">
@@ -51,7 +85,7 @@
       <section class="panel">
         <div class="panel-head">
           <h2>Customer Accounts</h2>
-          <span class="live-dot" title="Refreshing every 2 seconds">LIVE</span>
+          <span class="live-dot" title="Refreshing every second">LIVE</span>
         </div>
         <table class="data-table">
           <thead>
@@ -72,7 +106,7 @@
       <section class="panel">
         <div class="panel-head">
           <h2>Live Transactions</h2>
-          <span class="live-dot" title="Refreshing every 2 seconds">LIVE</span>
+          <span class="live-dot" title="Refreshing every second">LIVE</span>
         </div>
         <table class="data-table">
           <thead>
@@ -95,47 +129,85 @@
   <footer class="footer">
     AAST Bank &mdash; Smart ATM university project. Data served from
     <code>atm.db</code>; ATM activity arrives over the UART serial link.
+    The bank stores and displays only &mdash; the STM32 makes every decision.
   </footer>
 
 <script>
 // ===========================================================================
-// The whole page is just two fetch() calls on a 2 second timer.
+// The whole page is three fetch() calls on a 1 second timer.
 // ===========================================================================
 
-const REFRESH_MS = 2000;
+const REFRESH_MS = 1000;
 
-/** Format a whole-EGP number like 2000 -> "EGP 2,000" */
 function money(value) {
   return "EGP " + Number(value).toLocaleString("en-US");
 }
 
-/** Turn "2026-08-09T14:03:11" into a short readable time. */
 function shortTime(iso) {
   const d = new Date(iso);
-  if (isNaN(d)) return iso;                 // fall back to the raw string
+  if (isNaN(d)) return iso;
   return d.toLocaleTimeString("en-GB", { hour12: false }) +
          "  " + d.toLocaleDateString("en-GB");
 }
 
-/** Escape text before putting it in the page (safety habit). */
 function esc(text) {
   return String(text).replace(/[&<>"']/g, c => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   }[c]));
 }
 
-/** Friendly label + colour class for each transaction type. */
-const TXN_STYLE = {
-  WDR:  { label: "Withdrawal",  cls: "tag-wdr"  },
-  DEP:  { label: "Deposit",     cls: "tag-dep"  },
-  PIN:  { label: "PIN Change",  cls: "tag-pin"  },
-  LOCK: { label: "Card Locked", cls: "tag-lock" }
+// ---------------------------------------------------------------------------
+// LIVE ATM MONITOR
+// ---------------------------------------------------------------------------
+
+// How each state should look: a CSS class, a label, an icon, and the text to
+// draw on the little picture of the ATM's own screen.
+const ATM_STATES = {
+  IDLE:         { cls: "s-idle",    label: "IDLE",           icon: "●",
+                  screen: "PLEASE INSERT<br>YOUR CARD" },
+  CARD_READ:    { cls: "s-active",  label: "CARD INSERTED",  icon: "■",
+                  screen: "ENTER YOUR PIN" },
+  UNKNOWN_CARD: { cls: "s-warn",    label: "UNKNOWN CARD",   icon: "▲",
+                  screen: "CARD NOT<br>RECOGNISED" },
+  CARD_BLOCKED: { cls: "s-danger",  label: "CARD BLOCKED",   icon: "■",
+                  screen: "CARD BLOCKED" },
+  TXN_WDR:      { cls: "s-cash",    label: "DISPENSING",     icon: "▼",
+                  screen: "PLEASE TAKE<br>YOUR CASH" },
+  TXN_DEP:      { cls: "s-ok",      label: "DEPOSIT",        icon: "▲",
+                  screen: "DEPOSIT<br>ACCEPTED" },
+  PIN_CHANGED:  { cls: "s-ok",      label: "PIN CHANGED",    icon: "✱",
+                  screen: "PIN CHANGED" },
+  LOCKED:       { cls: "s-danger",  label: "CARD LOCKED",    icon: "■",
+                  screen: "CARD RETAINED<br>CONTACT BANK" }
 };
 
-// --- Accounts table ---------------------------------------------------------
+async function loadMonitor() {
+  const s = await (await fetch("/api/atm_state")).json();
+  const style = ATM_STATES[s.state] || ATM_STATES.IDLE;
+
+  // Swap the colour class on the whole panel.
+  const monitor = document.getElementById("monitor");
+  monitor.className = "monitor " + style.cls;
+
+  document.getElementById("lamp-icon").innerHTML = style.icon;
+  document.getElementById("monitor-state").textContent = style.label;
+  document.getElementById("monitor-detail").textContent = s.detail;
+  document.getElementById("atm-screen-text").innerHTML = style.screen;
+
+  document.getElementById("monitor-card").textContent =
+      s.name ? `${s.name}  (${s.uid})`
+             : (s.uid ? s.uid : "No card present");
+
+  document.getElementById("monitor-age").textContent =
+      (s.state === "IDLE") ? "" : `updated ${s.seconds_ago}s ago`;
+}
+
+// ---------------------------------------------------------------------------
+// Accounts table
+// ---------------------------------------------------------------------------
+
 async function loadAccounts() {
-  const res = await fetch("/api/accounts");
-  const accounts = await res.json();
+  const accounts = await (await fetch("/api/accounts")).json();
   const body = document.getElementById("accounts-body");
 
   if (accounts.length === 0) {
@@ -154,7 +226,6 @@ async function loadAccounts() {
       </tr>`).join("");
   }
 
-  // Update the summary cards from the same data.
   document.getElementById("stat-accounts").textContent = accounts.length;
   document.getElementById("stat-balance").textContent =
       money(accounts.reduce((sum, a) => sum + a.balance, 0));
@@ -162,10 +233,19 @@ async function loadAccounts() {
       accounts.filter(a => a.locked).length;
 }
 
-// --- Transaction feed -------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Transaction feed
+// ---------------------------------------------------------------------------
+
+const TXN_STYLE = {
+  WDR:  { label: "Withdrawal",  cls: "tag-wdr"  },
+  DEP:  { label: "Deposit",     cls: "tag-dep"  },
+  PIN:  { label: "PIN Change",  cls: "tag-pin"  },
+  LOCK: { label: "Card Locked", cls: "tag-lock" }
+};
+
 async function loadTransactions() {
-  const res = await fetch("/api/transactions?limit=50");
-  const txns = await res.json();
+  const txns = await (await fetch("/api/transactions?limit=50")).json();
   const body = document.getElementById("txn-body");
 
   if (txns.length === 0) {
@@ -174,7 +254,6 @@ async function loadTransactions() {
   } else {
     body.innerHTML = txns.map(t => {
       const style = TXN_STYLE[t.type] || { label: t.type, cls: "tag-other" };
-      // PIN and LOCK events are not money, so show a dash instead of 0.
       const amountCell = (t.type === "WDR" || t.type === "DEP")
             ? money(t.amount || 0) : "&mdash;";
       const who = t.name ? `${esc(t.name)} <span class="mono dim">(${esc(t.uid)})</span>`
@@ -192,17 +271,17 @@ async function loadTransactions() {
   document.getElementById("stat-txns").textContent = txns.length;
 }
 
-/** Refresh both panels; ignore a failed poll so the timer keeps running. */
+/** Refresh everything; ignore a failed poll so the timer keeps running. */
 async function refreshAll() {
   try {
-    await Promise.all([loadAccounts(), loadTransactions()]);
+    await Promise.all([loadMonitor(), loadAccounts(), loadTransactions()]);
   } catch (err) {
     console.error("Refresh failed:", err);
   }
 }
 
-refreshAll();                          // first load, immediately
-setInterval(refreshAll, REFRESH_MS);   // then every 2 seconds
+refreshAll();
+setInterval(refreshAll, REFRESH_MS);
 </script>
 </body>
 </html>

@@ -30,3 +30,7 @@ Thumbs.db
 # Local tool settings and the PATH backup are specific to one PC.
 .claude/settings.local.json
 .claude/user-path-backup.txt
+
+# SQLite WAL side-files (created at runtime by WAL mode)
+*.db-wal
+*.db-shm

@@ -1,25 +1,24 @@
 """
-atm_sim.py — a full ATM session simulated on the PC, with no hardware.
+atm_sim.py — a full ATM session in the terminal, with no hardware.
 
     Scan card -> enter PIN -> menu -> withdraw / deposit / change PIN -> eject
 
-This program pretends to be the STM32 ATM panel. It talks to serial_listener.py
-over exactly the same UART protocol the real board will use.
+This is the text version. `atm_gui.py` is the same machine with a window,
+a keypad and an LCD. Both get their rules from atm_core.py, so they always
+behave identically.
 
 WHY THIS FILE MATTERS
 ---------------------
-Every decision an ATM makes is made HERE, not on the PC:
+Every decision is made HERE, on the ATM side — never on the PC:
 
-  * Is this card known?          -> decided from the GET reply
-  * Is the card blocked?         -> decided from the GET reply
-  * Is the PIN correct?          -> compared locally, PC never sees the attempt
-  * Three wrong tries?           -> this program decides to send LOCK
-  * Enough money to withdraw?    -> checked locally BEFORE anything is sent
-  * What is the new balance?     -> calculated here, then sent to the PC
+  * Is this card known / blocked?  -> read from the GET reply
+  * Is the PIN correct?            -> compared locally, never transmitted
+  * Three wrong tries?             -> this side decides to send LOCK
+  * Enough money to withdraw?      -> checked before anything is sent
+  * What is the new balance?       -> calculated here, then sent in TXN
 
-The PC only ever stores what it is told. That split is the whole point of the
-project, and this file is the half that will become the STM32 firmware
-(Blue Pill / STM32F103 in C). Read it as a specification for that firmware.
+The PC only stores what it is told. Read atm_core.py alongside this file:
+that is the part which becomes the STM32 firmware.
 
 HOW TO RUN
 ----------
@@ -30,27 +29,25 @@ HOW TO RUN
   Terminal 1:  python atm_sim.py --port COM5
   Terminal 2:  python serial_listener.py --port COM4
 
-Keep http://localhost:5000 open while you use it - the portal updates live.
+Keep http://localhost:5000 open — the portal updates live.
 """
 
 import sys
 
-# Reuse the connection layer from fake_stm32.py so there is only one copy of
-# the socket / COM port code in the project.
-from fake_stm32 import connect
-
-# --- ATM policy. These are the bank's rules, enforced by the ATM itself. ---
-MAX_PIN_ATTEMPTS = 3        # after this many wrong PINs, the card is locked
-NOTE_SIZE = 50              # the machine only holds EGP 50 notes
-MAX_WITHDRAWAL = 5000       # per-transaction limit
+import atm_core
+from atm_core import (MAX_PIN_ATTEMPTS, balance_screen, decide_card,
+                      decide_deposit, decide_pin, decide_pin_change,
+                      decide_withdrawal)
+# Reuse the connection layer so there is only one copy of the socket/COM code.
+from fake_stm32 import LinkBusy, connect
 
 
 # ===========================================================================
-# Small helpers for the "screen"
+# Screen helpers
 # ===========================================================================
 
-def screen(*lines):
-    """Print something the cardholder would see on the ATM display."""
+def screen(lines):
+    """Print what the cardholder would see on the ATM display."""
     print()
     for line in lines:
         print(f"   | {line}")
@@ -58,25 +55,18 @@ def screen(*lines):
 
 
 def atm(message):
-    """Print a decision the ATM made internally.
-
-    These lines are the interesting ones during the demo: they show the board
-    thinking, with no message going to the bank.
-    """
-    print(f"  [ATM] {message}")
+    """Print a decision the ATM made internally — no traffic to the bank."""
+    if message:
+        print(f"  [ATM] {message}")
 
 
 def ask(prompt):
-    """Read one line of input. Returns None if the user wants out."""
+    """Read one line. Returns None if the user wants out."""
     try:
         return input(prompt).strip()
     except (EOFError, KeyboardInterrupt):
         return None
 
-
-# ===========================================================================
-# Talking to the bank
-# ===========================================================================
 
 class Bank:
     """One request, one response — with the traffic printed for the demo."""
@@ -86,7 +76,6 @@ class Bank:
         self._read = read_line
 
     def request(self, message):
-        """Send one line, return the one line that comes back (or None)."""
         print(f"  TX -> {message}")
         self._send(message)
         reply = self._read()
@@ -98,104 +87,46 @@ class Bank:
 
 
 # ===========================================================================
-# The card record we get back from GET
-# ===========================================================================
-
-class Card:
-    """Whatever the bank knows about the card now in the slot.
-
-    The STM32 will hold this in a struct while the customer is served, and
-    update `balance` locally after each accepted transaction, so it only needs
-    one GET per session.
-    """
-
-    def __init__(self, uid, name, pin, balance, locked):
-        self.uid = uid
-        self.name = name
-        self.pin = pin
-        self.balance = balance
-        self.locked = locked
-
-    @staticmethod
-    def parse(uid, reply):
-        """Turn 'REC:Amro:1234:2000:0' into a Card, or None if it is not a REC."""
-        parts = reply.split(":")
-        if len(parts) != 5 or parts[0] != "REC":
-            return None
-        return Card(uid, parts[1], parts[2], int(parts[3]), int(parts[4]))
-
-
-# ===========================================================================
 # Step 1 — the card is presented to the RFID reader
 # ===========================================================================
 
 def read_card(bank, uid):
-    """Ask the bank for the record, and decide whether to continue.
-
-    Returns a Card if the session may proceed, otherwise None.
-    """
+    """Ask the bank for the record and decide whether to continue."""
     reply = bank.request(f"GET:{uid}")
-    if reply is None:
-        return None
-
-    # The bank says it has never seen this card.
-    if reply == "NONE":
-        atm("Card not recognised by the bank.")
-        screen("CARD NOT RECOGNISED", "Please take your card.")
-        return None
-
-    card = Card.parse(uid, reply)
+    card, decision = decide_card(uid, reply)
+    atm(decision.note)
     if card is None:
-        atm(f"Unexpected reply from the bank: {reply}")
-        screen("OUT OF SERVICE")
-        return None
-
-    # The bank reported the card as blocked. The ATM decides to refuse it.
-    if card.locked:
-        atm("Record says locked = 1. Refusing the card.")
-        screen("CARD BLOCKED",
-               "Please contact your branch.")
-        return None
-
-    atm(f"Card accepted: {card.name}, balance EGP {card.balance}.")
+        screen(decision.screen)
     return card
 
 
 # ===========================================================================
-# Step 2 — PIN entry (checked on the board, never sent to the bank)
+# Step 2 — PIN entry, checked on the board and never transmitted
 # ===========================================================================
 
 def check_pin(bank, card):
-    """Ask for the PIN, up to MAX_PIN_ATTEMPTS times.
-
-    Returns True if the customer got it right. If they run out of attempts the
-    ATM locks the card itself and returns False.
-    """
+    """Up to MAX_PIN_ATTEMPTS tries. Locks the card if they all fail."""
     for attempt in range(1, MAX_PIN_ATTEMPTS + 1):
         entered = ask(f"   Enter PIN ({attempt}/{MAX_PIN_ATTEMPTS}): ")
         if entered is None:
             return False
 
-        # THE KEY LINE OF THE WHOLE PROJECT:
-        # the comparison happens here, on the board. The typed PIN never
-        # travels over the wire, and the bank is not asked to verify anything.
-        if entered == card.pin:
-            atm("PIN correct (compared on the board, nothing sent to the bank).")
+        decision = decide_pin(card, entered, attempt)
+        atm(decision.note)
+
+        if decision.approved:
             return True
 
-        remaining = MAX_PIN_ATTEMPTS - attempt
-        if remaining:
-            atm(f"PIN incorrect. {remaining} attempt(s) left. Nothing sent.")
-        else:
-            atm(f"{MAX_PIN_ATTEMPTS} wrong attempts - the ATM decides to lock this card.")
+        # Only the final failure carries a request (LOCK).
+        if decision.request:
+            if bank.request(decision.request) == "OK":
+                screen(decision.screen)
+            else:
+                screen(["ERROR", "Please contact your branch."])
+            return False
 
-    # Out of attempts: now, and only now, do we tell the bank.
-    if bank.request(f"LOCK:{card.uid}") == "OK":
-        screen("CARD BLOCKED",
-               "Too many incorrect PIN entries.",
-               "Please contact your branch.")
-    else:
-        screen("ERROR", "Please contact your branch.")
+        screen(decision.screen)
+
     return False
 
 
@@ -203,94 +134,32 @@ def check_pin(bank, card):
 # Step 3 — the menu
 # ===========================================================================
 
-def do_balance(card):
-    """No request needed: the balance came back with the original GET."""
-    atm("Answering from the record already in memory - no request sent.")
-    screen(f"Account holder: {card.name}",
-           f"Available balance: EGP {card.balance:,}")
-
-
-def do_withdraw(bank, card):
-    """Withdraw cash. Every check happens here before anything is sent."""
-    raw = ask(f"   Amount to withdraw (multiples of {NOTE_SIZE}): ")
+def do_money(bank, card, kind):
+    """Withdraw or deposit. `kind` is "WDR" or "DEP"."""
+    word = "withdraw" if kind == "WDR" else "deposit"
+    raw = ask(f"   Amount to {word} (multiples of {atm_core.NOTE_SIZE}): ")
     if raw is None:
         return
 
-    if not raw.isdigit() or int(raw) <= 0:
-        atm("Not a valid amount. Nothing sent.")
-        screen("INVALID AMOUNT")
+    decide = decide_withdrawal if kind == "WDR" else decide_deposit
+    decision = decide(card, raw)
+    atm(decision.note)
+
+    if not decision.approved:
+        screen(decision.screen)      # refused here; nothing was sent
         return
 
-    amount = int(raw)
-
-    # --- the three checks the STM32 must do, in order --------------------
-    if amount % NOTE_SIZE != 0:
-        atm(f"{amount} is not a multiple of {NOTE_SIZE}. Nothing sent.")
-        screen(f"THIS MACHINE ONLY DISPENSES EGP {NOTE_SIZE} NOTES")
+    if bank.request(decision.request) != "OK":
+        atm("The bank did not confirm - cancelling.")
+        screen(["TRANSACTION FAILED", "Please try again later."])
         return
 
-    if amount > MAX_WITHDRAWAL:
-        atm(f"{amount} is over the EGP {MAX_WITHDRAWAL} limit. Nothing sent.")
-        screen(f"LIMIT IS EGP {MAX_WITHDRAWAL:,} PER TRANSACTION")
-        return
-
-    if amount > card.balance:
-        atm(f"Insufficient funds: needs {amount}, has {card.balance}. Nothing sent.")
-        screen("INSUFFICIENT FUNDS",
-               f"Available: EGP {card.balance:,}")
-        return
-
-    # --- all checks passed: the ATM works out the new balance itself -----
-    new_balance = card.balance - amount
-    atm(f"Checks passed. New balance computed here: "
-        f"{card.balance} - {amount} = {new_balance}")
-
-    if bank.request(f"TXN:{card.uid}:WDR:{amount}:{new_balance}") != "OK":
-        atm("The bank refused to record it - cancelling, no cash dispensed.")
-        screen("TRANSACTION FAILED", "Please try again later.")
-        return
-
-    # Only update our copy once the bank confirmed it stored the new balance.
-    card.balance = new_balance
-    screen("PLEASE TAKE YOUR CASH",
-           f"Dispensed: EGP {amount:,}",
-           f"Remaining balance: EGP {card.balance:,}")
-
-
-def do_deposit(bank, card):
-    """Deposit cash. The machine counts the notes, so it sets the new total."""
-    raw = ask(f"   Amount to deposit (multiples of {NOTE_SIZE}): ")
-    if raw is None:
-        return
-
-    if not raw.isdigit() or int(raw) <= 0:
-        atm("Not a valid amount. Nothing sent.")
-        screen("INVALID AMOUNT")
-        return
-
-    amount = int(raw)
-    if amount % NOTE_SIZE != 0:
-        atm(f"{amount} is not a multiple of {NOTE_SIZE}. Nothing sent.")
-        screen(f"THIS MACHINE ONLY ACCEPTS EGP {NOTE_SIZE} NOTES")
-        return
-
-    new_balance = card.balance + amount
-    atm(f"Notes counted. New balance computed here: "
-        f"{card.balance} + {amount} = {new_balance}")
-
-    if bank.request(f"TXN:{card.uid}:DEP:{amount}:{new_balance}") != "OK":
-        atm("The bank refused to record it - returning the notes.")
-        screen("TRANSACTION FAILED", "Please take your notes back.")
-        return
-
-    card.balance = new_balance
-    screen("DEPOSIT ACCEPTED",
-           f"Credited: EGP {amount:,}",
-           f"New balance: EGP {card.balance:,}")
+    # Only update our copy once the bank confirmed the write.
+    card.balance = decision.balance
+    screen(decision.screen)
 
 
 def do_change_pin(bank, card):
-    """Change the PIN. The ATM validates the format and the confirmation."""
     first = ask("   New 4-digit PIN: ")
     if first is None:
         return
@@ -298,28 +167,19 @@ def do_change_pin(bank, card):
     if again is None:
         return
 
-    if len(first) != 4 or not first.isdigit():
-        atm("New PIN is not 4 digits. Nothing sent.")
-        screen("PIN MUST BE 4 DIGITS")
+    decision = decide_pin_change(card, first, again)
+    atm(decision.note)
+
+    if not decision.approved:
+        screen(decision.screen)
         return
 
-    if first != again:
-        atm("The two entries did not match. Nothing sent.")
-        screen("PINS DID NOT MATCH", "Please try again.")
-        return
-
-    if first == card.pin:
-        atm("New PIN is the same as the old one. Nothing sent.")
-        screen("PLEASE CHOOSE A DIFFERENT PIN")
-        return
-
-    if bank.request(f"PIN:{card.uid}:{first}") != "OK":
-        screen("COULD NOT CHANGE PIN", "Please try again later.")
+    if bank.request(decision.request) != "OK":
+        screen(["COULD NOT CHANGE PIN", "Please try again later."])
         return
 
     card.pin = first
-    screen("PIN CHANGED SUCCESSFULLY",
-           "Please remember your new PIN.")
+    screen(decision.screen)
 
 
 MENU = """   +--------------------------------+
@@ -333,21 +193,23 @@ MENU = """   +--------------------------------+
 
 def serve_customer(bank, card):
     """The menu loop, after a successful PIN entry."""
-    screen(f"Welcome, {card.name}")
+    screen([f"Welcome, {card.name}"])
 
     while True:
         print(MENU)
         choice = ask("   Select 1-5: ")
         if choice is None or choice == "5":
-            screen("PLEASE TAKE YOUR CARD", "Thank you for banking with us.")
+            screen(["PLEASE TAKE YOUR CARD", "Thank you for banking with us."])
             return
 
         if choice == "1":
-            do_balance(card)
+            decision = balance_screen(card)
+            atm(decision.note)
+            screen(decision.screen)
         elif choice == "2":
-            do_withdraw(bank, card)
+            do_money(bank, card, "WDR")
         elif choice == "3":
-            do_deposit(bank, card)
+            do_money(bank, card, "DEP")
         elif choice == "4":
             do_change_pin(bank, card)
         else:
@@ -370,7 +232,7 @@ def run_atm(bank):
     print(" Type 'quit' at the card prompt to shut the machine down.\n")
 
     while True:
-        screen("WELCOME TO AAST BANK", "Please insert your card.")
+        screen(["WELCOME TO AAST BANK", "Please insert your card."])
 
         uid = ask("   [Tap card on RFID reader - type a UID]: ")
         if uid is None or uid.lower() in ("quit", "exit"):
@@ -384,7 +246,7 @@ def run_atm(bank):
 
         card = read_card(bank, uid)
         if card is None:
-            continue                     # bad card: straight back to idle
+            continue                     # bad card: back to idle
 
         if not check_pin(bank, card):
             continue                     # wrong PIN: back to idle
@@ -393,7 +255,11 @@ def run_atm(bank):
 
 
 def main():
-    send_line, read_line, close, how = connect(sys.argv[1:])
+    try:
+        send_line, read_line, close, how = connect(sys.argv[1:])
+    except LinkBusy as err:
+        print(f"\n{err}\n")
+        return
     print(f"\nConnected to the bank via: {how}")
     try:
         run_atm(Bank(send_line, read_line))

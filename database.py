@@ -23,9 +23,16 @@ def get_connection():
 
     row_factory = sqlite3.Row lets us read columns by name (row["name"])
     instead of by number (row[1]), which is much easier to read.
+
+    busy_timeout tells SQLite to wait up to 5 seconds if the file is briefly
+    locked by someone else — for example while DB Browser for SQLite is
+    saving an edit — instead of failing straight away with "database is
+    locked". Every function below opens a connection, does its work and
+    closes it again, so the file is never held open between operations.
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -33,6 +40,13 @@ def init_db():
     """Create the two tables if they do not exist yet. Safe to run twice."""
     conn = get_connection()
     cur = conn.cursor()
+
+    # WAL ("write-ahead logging") mode. This matters for the demo: it lets
+    # another program — DB Browser for SQLite — READ atm.db at the same time
+    # as the portal and the serial listener are writing to it. In the default
+    # mode a writer blocks readers and you get "database is locked".
+    # This setting is stored in the file itself, so it only has to be set once.
+    cur.execute("PRAGMA journal_mode = WAL")
 
     # One row per RFID card / cardholder.
     cur.execute(
@@ -60,8 +74,70 @@ def init_db():
         """
     )
 
+    # A single row that always holds "what is the ATM doing right now?".
+    # The serial listener writes it as messages arrive from the STM32; the web
+    # dashboard reads it to draw the Live ATM Monitor. It is only a MIRROR of
+    # the STM32's activity — nothing here controls the ATM or decides anything.
+    #
+    # CHECK (id = 1) is a small trick that stops a second row ever being added,
+    # so there is exactly one "current state".
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS atm_state (
+            id      INTEGER PRIMARY KEY CHECK (id = 1),
+            state   TEXT NOT NULL,     -- IDLE, CARD_READ, TXN_WDR, LOCKED, ...
+            detail  TEXT NOT NULL,     -- the sentence shown on the dashboard
+            uid     TEXT,              -- card involved, if any
+            name    TEXT,              -- cardholder name, if known
+            amount  INTEGER,           -- money involved, 0 for other events
+            updated TEXT NOT NULL      -- ISO datetime, used to fade back to idle
+        )
+        """
+    )
+    # Make sure the single row exists.
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO atm_state (id, state, detail, uid, name, amount, updated)
+        VALUES (1, 'IDLE', 'Idle - waiting for card', NULL, NULL, 0, ?)
+        """,
+        (datetime.now().isoformat(timespec="seconds"),),
+    )
+
     conn.commit()
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Live ATM state (the monitor panel on the dashboard)
+# ---------------------------------------------------------------------------
+
+def set_atm_state(state, detail, uid=None, name=None, amount=0):
+    """Record what the ATM is doing right now.
+
+    Called by serial_listener.py every time a message arrives from the STM32.
+    It never affects the reply sent back to the board — it is purely for the
+    dashboard to look at.
+    """
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE atm_state
+        SET state = ?, detail = ?, uid = ?, name = ?, amount = ?, updated = ?
+        WHERE id = 1
+        """,
+        (state, detail, uid, name, int(amount or 0),
+         datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_atm_state():
+    """Read the current ATM state as a dict."""
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM atm_state WHERE id = 1").fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 # ---------------------------------------------------------------------------
