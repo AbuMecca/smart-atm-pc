@@ -23,6 +23,7 @@ to it over a serial (UART) COM port.
 | `app.py` | The Flask web server: two pages plus a small JSON API. |
 | `serial_listener.py` | The UART loop. Implements the 4 protocol commands. |
 | `fake_stm32.py` | Pretends to be the STM32 so the protocol can be tested with no hardware. |
+| `atm_sim.py` | A full ATM session (scan → PIN → menu → withdraw) simulated on the PC. |
 | `show_db.py` | Prints the raw database (schema + both tables) with no web server involved. |
 | `templates/portal.html` | Main dashboard — accounts + live transaction feed. |
 | `templates/admin.html` | Bank staff screen — add / edit / lock / delete cardholders. |
@@ -169,6 +170,42 @@ a tiny TCP server, and `serial_listener.py` connects to it using pyserial's
 `socket://` port type. The bytes travel over localhost instead of a wire, but
 `serial_listener.py` is running its genuine serial code — same `readline()`,
 same `write()`, same everything.
+
+### The full ATM experience — `atm_sim.py`
+
+The options above send one protocol line at a time. `atm_sim.py` runs the whole
+cash-machine flow instead: scan a card, enter a PIN, use a menu.
+
+Terminal 1:
+```bash
+python atm_sim.py
+```
+
+Terminal 2:
+```bash
+python serial_listener.py --port socket://localhost:5555
+```
+
+It plays the part of the STM32, so **every decision is made inside
+`atm_sim.py`**, never on the PC:
+
+| Decision | Made by | Sent to the bank? |
+|---|---|---|
+| Is the card known / blocked? | Read from the `GET` reply | — |
+| Is the PIN correct? | Compared on the board | **No.** The typed PIN never leaves the ATM |
+| 3 wrong PINs → lock the card | The ATM decides | Then `LOCK:<uid>` |
+| Enough money to withdraw? | Checked before sending | Nothing sent if it fails |
+| What is the new balance? | Calculated on the board | Sent inside `TXN` |
+
+Watch the `[ATM]` lines during a demo — those are the board thinking, with no
+traffic to the bank. The `TX ->` / `RX <-` lines are the only things that
+actually cross the wire.
+
+This file is also a **specification for the STM32 firmware**: the C code on the
+Blue Pill has to make exactly the same decisions in the same order.
+
+ATM policy constants live at the top of the file and are easy to change:
+`MAX_PIN_ATTEMPTS = 3`, `NOTE_SIZE = 50`, `MAX_WITHDRAWAL = 5000`.
 
 ### Option C — a virtual COM port pair (closest to real hardware)
 

@@ -1,12 +1,17 @@
 """
-fake_stm32.py — pretend to be the STM32 so you can test the whole protocol
+fake_stm32.py — pretend to be the STM32 so you can test the protocol
                 without any hardware.
 
-It plays the role of the microcontroller: you type a request, it sends the
-line, then it waits for the single response line the PC sends back.
+This is the LOW-LEVEL tool: you type one raw request line, it sends it, and it
+prints the one response line the PC sends back. Use it to check individual
+commands and error cases.
 
-Two ways to use it
-------------------
+For the full cash-machine experience (scan card -> PIN -> menu -> withdraw),
+run `python atm_sim.py` instead. It uses the same connection code from this
+file, but adds the decision-making the real STM32 will do.
+
+Two ways to connect
+-------------------
 
 1) SOCKET MODE (easiest — nothing to install, works out of the box)
 
@@ -14,8 +19,6 @@ Two ways to use it
                 -> it waits for the listener to connect
 
    Terminal 2:  python serial_listener.py --port socket://localhost:5555
-
-   Then type commands in Terminal 1.
 
    Here fake_stm32.py is a tiny TCP server and serial_listener.py connects to
    it as a pyserial "socket://" port. The bytes travel over localhost instead
@@ -44,7 +47,7 @@ import sys
 
 SOCKET_HOST = "localhost"
 SOCKET_PORT = 5555      # only used in socket mode
-BAUD_RATE = 9600        # only used in virtual COM port mode
+BAUD_RATE = 9600        # only used in COM port mode
 
 EXAMPLES = [
     "GET:A1B2C3D4",
@@ -55,6 +58,102 @@ EXAMPLES = [
     "LOCK:11223344",
 ]
 
+
+# ===========================================================================
+# The connection layer.
+#
+# Both open_socket_link() and open_serial_link() return the same three things:
+#
+#   send_line(text) -> put one line on the wire
+#   read_line()     -> wait for one line back (None if the link closed)
+#   close()         -> hang up
+#
+# Because they look identical from the outside, everything above this layer
+# (this file's prompt loop, and the whole of atm_sim.py) works the same way
+# over a socket, a virtual COM port, or a real cable to the STM32.
+# ===========================================================================
+
+def open_socket_link(quiet=False):
+    """Act as a tiny TCP server and wait for serial_listener.py to connect."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((SOCKET_HOST, SOCKET_PORT))
+    server.listen(1)
+
+    if not quiet:
+        print(f"Waiting for serial_listener.py to connect on port {SOCKET_PORT}...")
+        print("  In another terminal run:")
+        print(f"  python serial_listener.py --port socket://{SOCKET_HOST}:{SOCKET_PORT}\n")
+
+    conn, addr = server.accept()
+    buffer = b""
+
+    def send_line(text):
+        conn.sendall((text + "\n").encode("ascii"))
+
+    def read_line():
+        """Collect bytes until we have a full '\\n'-terminated line."""
+        nonlocal buffer
+        while b"\n" not in buffer:
+            try:
+                chunk = conn.recv(256)
+            except OSError:
+                return None                # the link broke
+            if not chunk:
+                return None                # the other side hung up
+            buffer += chunk
+        line, buffer = buffer.split(b"\n", 1)
+        return line.decode("ascii", errors="replace").strip()
+
+    def close():
+        conn.close()
+        server.close()
+
+    return send_line, read_line, close, f"socket {addr[0]}:{addr[1]}"
+
+
+def open_serial_link(port, quiet=False):
+    """Open a real or virtual COM port."""
+    import serial
+
+    if not quiet:
+        print(f"Opening {port} at {BAUD_RATE} baud (8N1)...")
+
+    link = serial.serial_for_url(
+        port,
+        baudrate=BAUD_RATE,
+        bytesize=serial.EIGHTBITS,
+        parity=serial.PARITY_NONE,
+        stopbits=serial.STOPBITS_ONE,
+        timeout=3,
+    )
+
+    def send_line(text):
+        link.write((text + "\n").encode("ascii"))
+        link.flush()
+
+    def read_line():
+        raw = link.readline()
+        if not raw:
+            return None                    # timed out
+        return raw.decode("ascii", errors="replace").strip()
+
+    def close():
+        link.close()
+
+    return send_line, read_line, close, port
+
+
+def connect(args, quiet=False):
+    """Pick the connection type from the command line: --port COMx, or socket."""
+    if "--port" in args:
+        return open_serial_link(args[args.index("--port") + 1], quiet)
+    return open_socket_link(quiet)
+
+
+# ===========================================================================
+# The raw prompt loop
+# ===========================================================================
 
 def print_banner(how):
     print("=" * 62)
@@ -68,11 +167,7 @@ def print_banner(how):
 
 
 def prompt_loop(send_line, read_line):
-    """Ask for a command, send it, print the one response line we get back.
-
-    send_line(text) and read_line() are supplied by whichever mode we are in,
-    so this loop does not care whether it is talking over TCP or a COM port.
-    """
+    """Ask for a raw command, send it, print the single response line."""
     while True:
         try:
             request = input("send> ").strip()
@@ -96,88 +191,14 @@ def prompt_loop(send_line, read_line):
         print(f"  RX <- {response}\n")
 
 
-# ---------------------------------------------------------------------------
-# Mode 1: TCP socket (no drivers needed)
-# ---------------------------------------------------------------------------
-
-def run_socket():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((SOCKET_HOST, SOCKET_PORT))
-    server.listen(1)
-
-    print(f"Waiting for serial_listener.py to connect on port {SOCKET_PORT}...")
-    print("  In another terminal run:")
-    print(f"  python serial_listener.py --port socket://{SOCKET_HOST}:{SOCKET_PORT}\n")
-
-    conn, addr = server.accept()
-    print_banner(f"socket {addr[0]}:{addr[1]}")
-
-    buffer = b""
-
-    def send_line(text):
-        conn.sendall((text + "\n").encode("ascii"))
-
-    def read_line():
-        """Collect bytes until we have a full '\\n'-terminated line."""
-        nonlocal buffer
-        while b"\n" not in buffer:
-            chunk = conn.recv(256)
-            if not chunk:
-                return None            # the other side hung up
-            buffer += chunk
-        line, buffer = buffer.split(b"\n", 1)
-        return line.decode("ascii", errors="replace").strip()
-
-    try:
-        prompt_loop(send_line, read_line)
-    finally:
-        conn.close()
-        server.close()
-
-
-# ---------------------------------------------------------------------------
-# Mode 2: real / virtual COM port
-# ---------------------------------------------------------------------------
-
-def run_serial(port):
-    import serial
-
-    print(f"Opening {port} at {BAUD_RATE} baud (8N1)...")
-    link = serial.serial_for_url(
-        port,
-        baudrate=BAUD_RATE,
-        bytesize=serial.EIGHTBITS,
-        parity=serial.PARITY_NONE,
-        stopbits=serial.STOPBITS_ONE,
-        timeout=3,
-    )
-    print_banner(port)
-
-    def send_line(text):
-        link.write((text + "\n").encode("ascii"))
-        link.flush()
-
-    def read_line():
-        raw = link.readline()
-        if not raw:
-            return None                # timed out
-        return raw.decode("ascii", errors="replace").strip()
-
-    try:
-        prompt_loop(send_line, read_line)
-    finally:
-        link.close()
-        print(f"{port} closed.")
-
-
 def main():
-    args = sys.argv[1:]
-
-    if "--port" in args:
-        run_serial(args[args.index("--port") + 1])
-    else:
-        run_socket()
+    send_line, read_line, close, how = connect(sys.argv[1:])
+    print_banner(how)
+    try:
+        prompt_loop(send_line, read_line)
+    finally:
+        close()
+        print("Link closed.")
 
 
 if __name__ == "__main__":
