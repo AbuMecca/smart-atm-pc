@@ -22,12 +22,19 @@ Protocol
 
 How to run
 ----------
-  python serial_listener.py            # try the real COM port; if it will not
-                                       # open, drop into keyboard mode
-  python serial_listener.py --manual   # keyboard mode straight away (no hardware)
-  python serial_listener.py --port COM7
+  py serial_listener.py --listen    # BANK MODE (no hardware): wait for a
+                                    # PC-based ATM (atm_gui.py) to connect.
+                                    # This is what 1_BANK.bat uses.
+  py serial_listener.py             # REAL HARDWARE: open the COM port below.
+                                    # Falls back to keyboard mode if it fails.
+  py serial_listener.py --manual    # keyboard mode: type protocol lines by hand
+  py serial_listener.py --port COM7 # override the COM port for one run
+
+Whichever mode is used, the rules never change: one request in, exactly one
+response out, and the PC never speaks first.
 """
 
+import socket
 import sys
 
 import database
@@ -39,6 +46,10 @@ import database
 SERIAL_PORT = "COM3"
 BAUD_RATE = 9600          # 8N1 is pyserial's default, so we only set the speed
 READ_TIMEOUT = 1          # seconds; lets us notice Ctrl+C between lines
+
+# Port used by --listen mode, where PC-based ATMs connect instead of a cable.
+# Must match BANK_PORT in fake_stm32.py.
+LISTEN_PORT = 5555
 
 # Transaction types we accept in a TXN message.
 MONEY_TYPES = ("WDR", "DEP")
@@ -247,7 +258,91 @@ def run_serial(port):
 
 
 # ---------------------------------------------------------------------------
-# Mode 2: keyboard (no hardware needed)
+# Mode 2: the bank waits for PC-based ATMs to connect (no hardware needed)
+# ---------------------------------------------------------------------------
+
+def serve_one_atm(conn, address):
+    """Talk to one connected ATM until it disconnects.
+
+    Exactly the same rules as the serial loop: read one request line, answer
+    with exactly one response line, never speak first.
+    """
+    print(f"\nATM connected from {address[0]}:{address[1]}\n", flush=True)
+    buffer = b""
+
+    while True:
+        # Collect bytes until we have a complete '\n'-terminated line.
+        while b"\n" not in buffer:
+            try:
+                chunk = conn.recv(256)
+            except OSError:
+                return
+            if not chunk:
+                return                      # the ATM hung up
+            buffer += chunk
+
+        raw, buffer = buffer.split(b"\n", 1)
+        request = raw.decode("ascii", errors="replace").strip()
+        if not request:
+            continue
+
+        log("RX <-", request)
+        response = handle_line(request)
+        if response is None:
+            continue
+
+        log("TX ->", response)
+        try:
+            conn.sendall((response + "\n").encode("ascii"))
+        except OSError:
+            return                          # the ATM vanished mid-reply
+
+
+def run_listen(port):
+    """Act as the bank: sit on a port and serve whichever ATM connects.
+
+    When an ATM closes, we simply wait for the next one, so the bank can stay
+    running all day while cash machines come and go.
+    """
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        # Windows: stop a second copy of the bank silently stealing the port.
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    try:
+        # 127.0.0.1 (not "localhost") so the ATM always finds us on IPv4,
+        # and so the bank is reachable only from this PC.
+        server.bind(("127.0.0.1", port))
+    except OSError as err:
+        print(f"\nCould not open port {port}: {err}")
+        print("Another bank is probably already running. Close it and retry.\n")
+        server.close()
+        return
+
+    server.listen(1)
+    print(f"Bank is open on port {port}. Waiting for an ATM to connect...")
+    print("Start the ATM now (2_ATM.bat). Press Ctrl+C to close the bank.\n")
+
+    try:
+        while True:
+            conn, address = server.accept()
+            try:
+                serve_one_atm(conn, address)
+            finally:
+                conn.close()
+            mirror("IDLE", "Idle - waiting for card")
+            print("\nATM disconnected. Waiting for the next one...\n", flush=True)
+    except KeyboardInterrupt:
+        print("\nBank closed by user.")
+    finally:
+        server.close()
+
+
+# ---------------------------------------------------------------------------
+# Mode 3: keyboard (no hardware needed)
 # ---------------------------------------------------------------------------
 
 def run_manual():
@@ -305,6 +400,17 @@ def main():
 
     if "--manual" in args:
         run_manual()
+        return
+
+    # --listen: no hardware. Wait for a PC-based ATM (atm_gui.py / atm_sim.py)
+    # to connect. This is what 1_BANK.bat uses.
+    if "--listen" in args:
+        index = args.index("--listen")
+        # An optional port may follow, e.g. --listen 5556
+        if index + 1 < len(args) and args[index + 1].isdigit():
+            run_listen(int(args[index + 1]))
+        else:
+            run_listen(LISTEN_PORT)
         return
 
     try:

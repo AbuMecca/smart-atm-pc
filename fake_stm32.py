@@ -1,53 +1,57 @@
 """
-fake_stm32.py — pretend to be the STM32 so you can test the protocol
-                without any hardware.
+fake_stm32.py — the low-level protocol tool, and the shared connection layer.
 
-This is the LOW-LEVEL tool: you type one raw request line, it sends it, and it
-prints the one response line the PC sends back. Use it to check individual
-commands and error cases.
+TWO JOBS
+--------
+1. On its own, this is a debugging tool: you type ONE raw protocol line and it
+   shows you the ONE line the bank sends back. Good for checking a single
+   command or an error case.
 
-For the full cash-machine experience (scan card -> PIN -> menu -> withdraw),
-run `python atm_sim.py` instead. It uses the same connection code from this
-file, but adds the decision-making the real STM32 will do.
+2. It also holds the connection code that atm_gui.py and atm_sim.py both use,
+   so the project has only one copy of it.
 
-Two ways to connect
--------------------
+HOW THE PIECES CONNECT
+----------------------
+The BANK is the server and the ATMs are clients, exactly like the real world:
+the bank sits there waiting, and cash machines connect to it.
 
-1) SOCKET MODE (easiest — nothing to install, works out of the box)
+    serial_listener.py --listen        <- the bank, waiting on port 5555
+              ^
+              |  protocol lines over localhost
+              |
+    atm_gui.py / atm_sim.py / fake_stm32.py    <- an ATM, connects in
 
-   Terminal 1:  python fake_stm32.py
-                -> it waits for the listener to connect
+So you always start the bank FIRST, then the ATM. If you start this before the
+bank is ready it will keep retrying for a few seconds rather than give up.
 
-   Terminal 2:  python serial_listener.py --port socket://localhost:5555
+With real hardware there is no socket at all — the STM32 is wired to a COM
+port, and serial_listener.py reads that port instead.
 
-   Here fake_stm32.py is a tiny TCP server and serial_listener.py connects to
-   it as a pyserial "socket://" port. The bytes travel over localhost instead
-   of a wire, but serial_listener.py runs its real serial code either way.
+USAGE
+-----
+    py fake_stm32.py                  connect to the bank on localhost:5555
+    py fake_stm32.py --port COM5      talk over a real/virtual COM port instead
 
-2) VIRTUAL COM PORT MODE (closest to the real thing)
-
-   Install a virtual null-modem driver that gives you a linked pair of ports
-   (com0com on Windows -> e.g. COM4 <-> COM5, or `socat` on Linux).
-
-   Terminal 1:  python fake_stm32.py --port COM5
-   Terminal 2:  python serial_listener.py --port COM4
-
-Commands to try
----------------
-   GET:A1B2C3D4                  -> REC:Amro:1234:2000:0
-   GET:FFFFFFFF                  -> NONE
-   TXN:A1B2C3D4:WDR:500:1500     -> OK
-   TXN:A1B2C3D4:DEP:200:1700     -> OK
-   PIN:A1B2C3D4:4321             -> OK
-   LOCK:11223344                 -> OK
+Commands to try:
+    GET:A1B2C3D4                  -> REC:Amro:1234:2000:0
+    GET:FFFFFFFF                  -> NONE
+    TXN:A1B2C3D4:WDR:500:1500     -> OK
+    PIN:A1B2C3D4:4321             -> OK
+    LOCK:11223344                 -> OK
 """
 
 import socket
 import sys
+import time
 
-SOCKET_HOST = "localhost"
-SOCKET_PORT = 5555      # only used in socket mode
-BAUD_RATE = 9600        # only used in COM port mode
+# Where the bank is listening. Must match serial_listener.py's LISTEN_PORT.
+# We use 127.0.0.1 rather than "localhost" on purpose: on Windows "localhost"
+# is tried as IPv6 first, which makes a failed connection take seconds instead
+# of being refused instantly.
+BANK_HOST = "127.0.0.1"
+BANK_PORT = 5555
+
+BAUD_RATE = 9600        # only used when talking to a real COM port
 
 EXAMPLES = [
     "GET:A1B2C3D4",
@@ -59,84 +63,80 @@ EXAMPLES = [
 ]
 
 
+class LinkBusy(Exception):
+    """Raised when we cannot reach the bank. The message explains what to do."""
+
+
 # ===========================================================================
 # The connection layer.
 #
-# Both open_socket_link() and open_serial_link() return the same three things:
+# open_client_link() and open_serial_link() both return the same four things:
 #
 #   send_line(text) -> put one line on the wire
 #   read_line()     -> wait for one line back (None if the link closed)
 #   close()         -> hang up
+#   description     -> a short string for the status bar
 #
-# Because they look identical from the outside, everything above this layer
-# (this file's prompt loop, and the whole of atm_sim.py) works the same way
-# over a socket, a virtual COM port, or a real cable to the STM32.
+# Because they look identical from the outside, everything built on top works
+# the same over localhost, over a virtual COM port, or over a real cable.
 # ===========================================================================
 
-class LinkBusy(Exception):
-    """Raised when the socket port is already taken by another simulator."""
-
-
-def open_socket_link(quiet=False):
-    """Act as a tiny TCP server and wait for serial_listener.py to connect."""
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
-        # Windows only. Without this, a SECOND copy of this program is allowed
-        # to bind the same port and will silently steal the listener's
-        # connection from the first copy - which looks like the ATM simply
-        # hanging. This makes the second copy fail immediately instead.
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-    else:
-        # Linux/Mac: lets the port be reused straight after a restart.
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-    try:
-        server.bind((SOCKET_HOST, SOCKET_PORT))
-    except OSError as err:
-        server.close()
-        raise LinkBusy(
-            f"Port {SOCKET_PORT} is already in use ({err}).\n"
-            f"Another atm_gui.py, atm_sim.py or fake_stm32.py is probably still\n"
-            f"running. Close it and try again."
-        ) from None
-
-    server.listen(1)
-
+def open_client_link(host=BANK_HOST, port=BANK_PORT, quiet=False,
+                     attempts=6, delay=0.3):
+    """Connect to the bank as a client, retrying briefly if it is still booting."""
     if not quiet:
-        print(f"Waiting for serial_listener.py to connect on port {SOCKET_PORT}...")
-        print("  In another terminal run:")
-        print(f"  python serial_listener.py --port socket://{SOCKET_HOST}:{SOCKET_PORT}\n")
+        print(f"Connecting to the bank at {host}:{port} ...")
 
-    conn, addr = server.accept()
+    sock = None
+    for attempt in range(attempts):
+        try:
+            # A short timeout: a refused connection comes back instantly, so
+            # this only caps how long we wait if something is really stuck.
+            sock = socket.create_connection((host, port), timeout=0.5)
+            break
+        except OSError:
+            time.sleep(delay)
+
+    if sock is None:
+        raise LinkBusy(
+            f"Could not reach the bank at {host}:{port}.\n\n"
+            f"Start the bank first, then this program:\n"
+            f"  double-click 1_BANK.bat   (or run: py serial_listener.py --listen)"
+        )
+
+    # Generous timeout: the bank answers in microseconds, so if we ever wait
+    # this long something is wrong and we want to notice rather than hang.
+    sock.settimeout(10)
     buffer = b""
 
     def send_line(text):
-        conn.sendall((text + "\n").encode("ascii"))
+        sock.sendall((text + "\n").encode("ascii"))
 
     def read_line():
         """Collect bytes until we have a full '\\n'-terminated line."""
         nonlocal buffer
         while b"\n" not in buffer:
             try:
-                chunk = conn.recv(256)
+                chunk = sock.recv(256)
             except OSError:
-                return None                # the link broke
+                return None                # timed out or the link broke
             if not chunk:
-                return None                # the other side hung up
+                return None                # the bank hung up
             buffer += chunk
         line, buffer = buffer.split(b"\n", 1)
         return line.decode("ascii", errors="replace").strip()
 
     def close():
-        conn.close()
-        server.close()
+        try:
+            sock.close()
+        except OSError:
+            pass
 
-    return send_line, read_line, close, f"socket {addr[0]}:{addr[1]}"
+    return send_line, read_line, close, f"bank at {host}:{port}"
 
 
 def open_serial_link(port, quiet=False):
-    """Open a real or virtual COM port."""
+    """Open a real or virtual COM port (used when there IS hardware)."""
     import serial
 
     if not quiet:
@@ -168,20 +168,24 @@ def open_serial_link(port, quiet=False):
 
 
 def connect(args, quiet=False):
-    """Pick the connection type from the command line: --port COMx, or socket."""
+    """Pick the connection from the command line.
+
+    --port COM5   -> a real or virtual serial port
+    (nothing)     -> connect to the bank on localhost:5555
+    """
     if "--port" in args:
         return open_serial_link(args[args.index("--port") + 1], quiet)
-    return open_socket_link(quiet)
+    return open_client_link(quiet=quiet)
 
 
 # ===========================================================================
-# The raw prompt loop
+# The raw prompt loop (this file's own job)
 # ===========================================================================
 
 def print_banner(how):
     print("=" * 62)
-    print(" FAKE STM32 - pretending to be the ATM front panel")
-    print(f" Connected via: {how}")
+    print(" FAKE STM32 - one raw protocol line at a time")
+    print(f" Connected to: {how}")
     print("=" * 62)
     print(" Example requests:")
     for example in EXAMPLES:
@@ -190,7 +194,6 @@ def print_banner(how):
 
 
 def prompt_loop(send_line, read_line):
-    """Ask for a raw command, send it, print the single response line."""
     while True:
         try:
             request = input("send> ").strip()
@@ -209,7 +212,7 @@ def prompt_loop(send_line, read_line):
 
         response = read_line()
         if response is None:
-            print("  !! no response (is serial_listener.py running?)")
+            print("  !! no response - the bank may have stopped.")
             return
         print(f"  RX <- {response}\n")
 
@@ -220,6 +223,7 @@ def main():
     except LinkBusy as err:
         print(f"\n{err}\n")
         return
+
     print_banner(how)
     try:
         prompt_loop(send_line, read_line)

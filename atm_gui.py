@@ -33,6 +33,7 @@ therefore stays responsive even while waiting for the bank.
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import font as tkfont
 
@@ -91,28 +92,54 @@ class LinkWorker:
         threading.Thread(target=self._run, daemon=True).start()
         self._poll()                         # starts on the UI thread
 
+    RETRY_SECONDS = 3     # wait this long before trying the bank again
+
     # -- runs on the worker thread ----------------------------------------
     def _run(self):
-        try:
-            self._send_line, self._read_line, self._close, how = \
-                connect(self._args, quiet=True)
-        except Exception as err:
-            self._post(self._on_status, f"Link failed: {err}")
-            return
+        """Keep a link to the bank alive for as long as the ATM is open.
 
-        self._post(self._on_status, f"Connected via {how}")
-
-        while True:
-            request, callback = self._jobs.get()
-            if request is None:              # shutdown signal
-                break
+        If the bank is not running yet, or it is restarted later, this keeps
+        retrying in the background. The machine puts itself OUT OF SERVICE
+        while there is no link and opens again by itself once there is one,
+        so the order you start things in stops mattering.
+        """
+        while not self._stopped:
             try:
-                self._send_line(request)
-                reply = self._read_line()
+                send_line, read_line, close, how = connect(self._args, quiet=True)
             except Exception as err:
-                self._post(self._on_status, f"Link error: {err}")
-                reply = None
-            self._post(callback, reply)
+                self._post(self._on_status, f"Link failed: {err}")
+                time.sleep(self.RETRY_SECONDS)
+                continue
+
+            self._send_line, self._read_line, self._close = send_line, read_line, close
+            self._post(self._on_status, f"Connected via {how}")
+
+            # Serve requests until the link dies or we are told to stop.
+            while not self._stopped:
+                request, callback = self._jobs.get()
+                if request is None:                  # shutdown signal
+                    return
+                try:
+                    send_line(request)
+                    reply = read_line()
+                except Exception:
+                    reply = None
+
+                # Always answer the caller, even on failure, so the screen
+                # never sits waiting for a reply that will never come.
+                self._post(callback, reply)
+
+                if reply is None:
+                    self._post(self._on_status, "Link error: connection to the bank lost")
+                    break                            # drop out and reconnect
+
+            try:
+                close()
+            except Exception:
+                pass
+
+            if not self._stopped:
+                time.sleep(self.RETRY_SECONDS)
 
     def _post(self, function, argument):
         """Called on the WORKER thread: park the result for the UI thread.
@@ -167,8 +194,14 @@ class ATMApp:
         self.root = root
         root.title("AAST Bank — ATM")
         root.configure(bg=SHELL)
-        root.geometry("980x660")
+        root.geometry("1040x720")
         root.minsize(880, 600)
+
+        # A real cash machine fills its screen, so start maximised.
+        try:
+            root.state("zoomed")            # Windows / most Linux desktops
+        except tk.TclError:
+            pass                            # not supported here; no harm done
 
         # --- session state ------------------------------------------------
         self.card = None            # the Card currently in the slot
@@ -180,8 +213,17 @@ class ATMApp:
 
         self._build_ui()
 
-        self.link = link or LinkWorker(root, args or [], self._set_status)
-        self.go_idle()
+        if link is not None:
+            # A stub link (used by the tests) is ready straight away.
+            self.link = link
+            self.go_idle()
+        else:
+            # A real link takes a moment to reach the bank. Until it does, the
+            # machine must NOT invite anyone to insert a card, because tapping
+            # would do nothing. go_idle() runs later, from _set_status().
+            self.set_state("BUSY")
+            self.show("STARTING UP", "Connecting to the bank...")
+            self.link = LinkWorker(root, args or [], self._set_status)
 
     # ------------------------------------------------------------------
     # Building the panel
@@ -259,13 +301,19 @@ class ATMApp:
 
         # Let the physical keyboard drive it too — much faster to demo.
         self.root.bind("<Key>", self._on_keyboard)
+        self.root.bind("<F2>", lambda e: self.toggle_monitor())
+        self.root.bind("<F11>", lambda e: self.toggle_fullscreen())
 
-        # --- bottom: serial monitor ----------------------------------------
-        monitor = tk.LabelFrame(self.root, text=" SERIAL MONITOR — what crosses the wire ",
-                                bg=SHELL, fg="#8fa8cc",
-                                font=("Segoe UI", 9, "bold"), bd=1)
-        monitor.pack(fill="both", padx=16, pady=(0, 14))
+        # --- bottom: serial monitor (ENGINEER VIEW, hidden by default) -----
+        # A real customer must never see this. It is a teaching aid showing
+        # the raw protocol traffic, so press F2 to reveal it when explaining
+        # the project, and F2 again to go back to the customer's view.
+        self.monitor_frame = tk.LabelFrame(
+            self.root, text=" SERIAL MONITOR — what crosses the wire (F2 to hide) ",
+            bg=SHELL, fg="#8fa8cc", font=("Segoe UI", 9, "bold"), bd=1)
+        self.monitor_visible = False
 
+        monitor = self.monitor_frame
         self.log = tk.Text(monitor, height=9, bg=LOG_BG, fg="#c9d6e8", font=mono,
                            bd=0, padx=10, pady=8, state="disabled", wrap="none")
         self.log.pack(fill="both", expand=True)
@@ -290,13 +338,39 @@ class ATMApp:
     # Screen and log helpers
     # ------------------------------------------------------------------
 
+    def toggle_monitor(self):
+        """F2: show or hide the engineer's view of the serial traffic."""
+        if self.monitor_visible:
+            self.monitor_frame.pack_forget()
+        else:
+            self.monitor_frame.pack(fill="both", padx=16, pady=(0, 14))
+        self.monitor_visible = not self.monitor_visible
+
+    def toggle_fullscreen(self):
+        """F11: true full screen, for the demo."""
+        self.root.attributes("-fullscreen",
+                             not self.root.attributes("-fullscreen"))
+
     def show(self, *lines):
         """Put text on the LCD."""
         self.lcd.config(text="\n\n".join(lines))
 
     def _set_status(self, text):
-        self.status.config(text=text)
+        """Show the link state in the header, and on screen if it went wrong."""
+        # The message can be several lines; the header only wants the first.
+        self.status.config(text=text.splitlines()[0])
         self.write_log(text, "dim")
+
+        if text.startswith("Connected"):
+            # The bank answered, so the machine can open for business.
+            self.go_idle()
+
+        elif text.startswith("Link failed") or text.startswith("Link error"):
+            # The machine cannot reach the bank, so it cannot serve anyone.
+            self.set_state("BUSY")
+            self.show("OUT OF SERVICE",
+                      "This machine cannot reach the bank.",
+                      "Please start the bank first (1_BANK.bat)")
 
     def write_log(self, text, tag="dim"):
         self.log.config(state="normal")

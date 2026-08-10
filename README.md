@@ -16,6 +16,53 @@ The ATM itself is an **STM32** microcontroller (keypad, LCD, RFID reader, servo)
 
 ---
 
+## 0. QUICK START — what to open, in what order
+
+The system is **three separate programs**, deliberately kept apart so a
+customer at the cash machine never sees the bank's screens.
+
+| # | Double-click | What it is | Who uses it |
+|---|---|---|---|
+| 1 | **`1_BANK.bat`** | The bank: website + ATM link | start this first |
+| 2 | **`2_ATM.bat`** | The cash machine | the customer |
+| 3 | **`3_ADMIN.bat`** | Cardholder admin menu | bank staff |
+| — | **`STOP.bat`** | Closes everything | |
+
+**The normal demo is just: double-click `1_BANK.bat`, then `2_ATM.bat`.**
+
+* `1_BANK.bat` opens two black windows and your browser at
+  **http://localhost:5000** — the staff dashboard.
+* `2_ATM.bat` opens the ATM screen. Click a card to tap it, type the PIN on
+  the keypad, use the menu.
+
+You can open `2_ATM.bat` twice to run two cash machines at once.
+
+### Who sees what
+
+| | Customer ATM (`2_ATM.bat`) | Staff dashboard (`localhost:5000`) |
+|---|---|---|
+| The card in the machine | yes | — |
+| That card's balance | yes, after the PIN | — |
+| **Everyone else's accounts** | **never** | yes |
+| **The bank's transaction list** | **never** | yes |
+| Live ATM status | — | yes |
+
+The ATM only ever knows about the one card in the slot. It asks the bank for
+that single record and nothing else, so there is no way for a customer to see
+another person's money.
+
+> **Two keys on the ATM, for your presentation:**
+> **F2** shows/hides the serial monitor (the raw protocol traffic — hidden by
+> default so it looks like a real cash machine). **F11** is full screen.
+
+### If the ATM says OUT OF SERVICE
+
+It cannot reach the bank. Start `1_BANK.bat`. **You do not need to restart the
+ATM** — it keeps trying in the background and opens for business by itself a
+few seconds after the bank appears.
+
+---
+
 ## 1. What each file does
 
 | File | What it does |
@@ -25,102 +72,101 @@ The ATM itself is an **STM32** microcontroller (keypad, LCD, RFID reader, servo)
 | `serial_listener.py` | The UART loop. Implements the 4 protocol commands. **COM port constant is at the top.** |
 | `admin_cli.py` | **The bank staff admin tool** — a menu in the terminal. |
 | `seed.py` | Creates `atm.db` and inserts the 3 sample cardholders. |
-| `start_atm.bat` | One-click launcher: starts everything and opens the browser. |
-| `stop_atm.bat` | Closes the two windows the launcher opened. |
+| `atm_gui.py` | **The cash machine** the customer uses. |
+| `1_BANK.bat` | Starts the bank (website + ATM link). |
+| `2_ATM.bat` | Starts a cash machine. |
+| `3_ADMIN.bat` | Starts the admin menu. |
+| `STOP.bat` | Closes everything. |
 | `templates/dashboard.html` | The operations dashboard + live ATM monitor. |
 | `templates/admin.html` | Optional web admin page (the CLI is the primary one now). |
 | `static/style.css` | The navy/blue bank theme. |
 | `atm.db` | The database file itself (created by `seed.py`). |
 | `show_db.py` | Prints the raw database in the terminal, no web server needed. |
 | `atm_sim.py` | A full ATM session simulated in the terminal (no hardware). |
-| `atm_gui.py` | The same ATM simulation as a window with a keypad (no hardware). |
 | `atm_core.py` | The ATM's decision rules, shared by both simulators. |
 | `fake_stm32.py` | Low-level tool: send one raw protocol line, see the reply. |
 
 ---
 
-## 2. Running it — Method A: one click (easiest)
+## 2. Running it — the one-click way
 
-**Double-click `start_atm.bat`.**
+See **§0** above: `1_BANK.bat`, then `2_ATM.bat`. That is the whole thing.
 
-That is the whole thing. It will:
-
-1. Move into the project folder, wherever you have put it.
-2. Use a `.venv` virtual environment if one exists, otherwise the `py` launcher.
-3. Install Flask and pyserial the first time, if they are missing.
-4. Create `atm.db` with the sample accounts if it does not exist yet.
-5. Open **two black windows** — the Web Portal and the Serial Listener.
-6. Open your browser at **http://localhost:5000**.
-
-**To stop everything:** close those two windows, or double-click `stop_atm.bat`.
-
-Leave both windows open during your demo. The Serial Listener window is worth
-showing to your professor — every line the STM32 sends and every line the PC
-replies with is printed there as it happens.
+`1_BANK.bat` picks a `.venv` if you have one, otherwise the `py` launcher,
+installs Flask and pyserial the first time, and creates `atm.db` if it is
+missing. So a fresh Windows PC needs nothing but Python installed.
 
 ---
 
-## 3. Running it — Method B: by hand (so you understand it)
+## 3. Running it — by hand (so you understand it)
 
-Open a terminal (press `Win`, type `powershell`, press Enter), then:
+Open a terminal (press `Win`, type `powershell`, press Enter):
 
 ```bash
 cd C:\Users\amrho\Smart_ATM
 ```
 
-**Step 1 — install the two libraries (once only):**
+**Once only — install the libraries and create the database:**
 
 ```bash
 py -m pip install -r requirements.txt
 ```
-
-**Step 2 — create the database (once only):**
-
 ```bash
 py seed.py
 ```
 
-It prints the accounts table afterwards so you can see it worked. Running it
-again is safe — existing accounts are left alone.
-
-**Step 3 — start the web portal.** Leave this terminal open:
+**Terminal 1 — the bank's website:**
 
 ```bash
 py app.py
 ```
 
-Then open **http://localhost:5000** in your browser.
-
-**Step 4 — start the serial listener in a SECOND terminal.** Leave it open too:
+**Terminal 2 — the bank's ATM link:**
 
 ```bash
-py serial_listener.py
+py serial_listener.py --listen
 ```
 
-Both programs share the same `atm.db` file. That is how activity from the ATM
-appears on the dashboard a moment later — they never talk to each other
-directly.
+**Terminal 3 — a cash machine:**
+
+```bash
+py atm_gui.py
+```
+
+Then open **http://localhost:5000** for the staff dashboard.
+
+`atm_sim.py` is the same cash machine as a text menu if you prefer the
+terminal to a window.
+
+### The two port numbers
+
+These are different things, and mixing them up is the easiest mistake to make:
+
+| Port | What it is |
+|---|---|
+| **5000** | The **website**. This is the one you open in a browser. |
+| **5555** | The pretend serial cable between the bank and a cash machine. Never open this in a browser. |
+
+With a real STM32 there is no port 5555 at all — the board is wired to a COM
+port, so you run `py serial_listener.py` with **no** `--listen`.
 
 ### Why `py` and not `python`?
 
-On Windows, `python` often runs a **fake placeholder** that Microsoft installs,
-which just prints:
+On Windows, `python` often runs a **fake placeholder** that just prints:
 
 ```
 Python was not found; run without arguments to install from the Microsoft Store
 ```
 
-`py` is the official Windows Python Launcher and does not have this problem, so
-every example above uses it.
+`py` is the official Windows Python Launcher and does not have this problem.
 
 **To fix `python` properly** (optional):
 
 > **Settings → Apps → Advanced app settings → App execution aliases**
 > → turn **off** `python.exe` and `python3.exe`.
 
-After that, close and reopen your terminal. Note that PATH and alias changes
-only affect **newly opened** terminals — an already-open window keeps the old
-settings, which is the usual reason a fix "doesn't work".
+Then close and reopen your terminal — PATH and alias changes only affect
+**newly opened** terminals, which is the usual reason a fix "doesn't work".
 
 ---
 
@@ -354,7 +400,7 @@ STM32> GET:FFFFFFFF
 
 Type `quit` to exit. If you start the listener normally and the COM port cannot
 be opened, it drops into this mode automatically — which is exactly what
-happens when you run `start_atm.bat` with no board plugged in.
+happens when you run `1_BANK.bat` with no board plugged in.
 
 ### Option B — the ATM simulator with a window
 
@@ -367,7 +413,7 @@ py atm_gui.py
 
 Terminal 2:
 ```bash
-py serial_listener.py --port socket://localhost:5555
+py serial_listener.py --listen
 ```
 
 Click a sample card to "tap" it, type the PIN on the keypad, use the menu.
@@ -393,7 +439,7 @@ bank at all. `atm_core.py` holds these rules and is effectively the
 py fake_stm32.py
 ```
 ```bash
-py serial_listener.py --port socket://localhost:5555
+py serial_listener.py --listen
 ```
 
 Sends exactly what you type and shows exactly what comes back. Best for
@@ -499,7 +545,7 @@ nothing is arriving on the port.
 `py -m pip install -r requirements.txt`.
 
 **Port 5000 already in use** — an old copy is still running. Run
-`stop_atm.bat`, or change the last line of `app.py` to `port=5001`.
+`STOP.bat`, or change the last line of `app.py` to `port=5001`.
 
 **`Port 5555 is already in use`** from a simulator — another `atm_gui.py`,
 `atm_sim.py` or `fake_stm32.py` is still open. Close it and try again.
