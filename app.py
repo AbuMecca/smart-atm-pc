@@ -28,6 +28,11 @@ import database
 
 app = Flask(__name__)
 
+# Re-read the HTML templates whenever they change on disk. Without this Flask
+# caches them at startup, so editing a page would appear to do nothing until
+# you restarted the server - confusing while working on the screens.
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+
 # ---------------------------------------------------------------------------
 # Small validation helpers (used by the admin API only)
 # ---------------------------------------------------------------------------

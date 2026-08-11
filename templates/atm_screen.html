@@ -175,7 +175,17 @@ const SCREENS = {
   // --- These come from the DATA messages (GET/TXN/LOCK), not ST:.
   // The board normally sends its own ST: screen too, but if it does not,
   // showing something sensible is better than showing nothing.
-  CARD_READ:    (s) => SCREENS.WELCOME(s),
+  //
+  // A GET means the card was just read and the board is about to ask for the
+  // PIN, so the PIN screen is the correct guess here - NOT the welcome
+  // screen, which only makes sense once the PIN has been accepted (and only
+  // the board knows that, via ST:WELCOME).
+  CARD_READ:    (s) => ({
+    html: `<div class="line-main">ENTER YOUR PIN</div>
+           ${pinDots(0)}
+           <div class="line-sub">Welcome${s.name ? ", " + esc(s.name) : ""} &mdash;
+                use the keypad on the machine</div>`
+  }),
   UNKNOWN_CARD: () => ({
     tone: "tone-warn",
     html: `<div class="line-main">CARD NOT RECOGNISED</div>
