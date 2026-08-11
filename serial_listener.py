@@ -34,8 +34,11 @@ Whichever mode is used, the rules never change: one request in, exactly one
 response out, and the PC never speaks first.
 """
 
+import queue
 import socket
 import sys
+import threading
+import time
 
 import database
 
@@ -77,6 +80,52 @@ HOLD_SECONDS = {
 }
 
 
+# The screen updates are written on a BACKGROUND thread.
+#
+# Why: mirror() writes a row to the database, and a database write can, in bad
+# luck, wait for a lock (another program such as DB Browser holding the file).
+# If that happened while we were part-way through answering a GET, the STM32
+# would be left waiting for its REC line and would decide the PC had gone
+# away. Screen bookkeeping must never be able to delay a reply to the board.
+#
+# So mirror() only drops the update into a queue - which takes microseconds -
+# and this worker writes it a moment later.
+_mirror_jobs = queue.Queue()
+_mirror_thread = None
+
+
+def _mirror_worker():
+    """Write queued screen updates, one at a time, off the reply path."""
+    while True:
+        job = _mirror_jobs.get()
+        try:
+            database.set_atm_state(*job)
+        except Exception as err:
+            print(f"  !! could not update the screen: {err}", flush=True)
+        finally:
+            _mirror_jobs.task_done()
+
+
+def _ensure_mirror_worker():
+    global _mirror_thread
+    if _mirror_thread is None:
+        _mirror_thread = threading.Thread(target=_mirror_worker, daemon=True)
+        _mirror_thread.start()
+
+
+def mirror_flush(timeout=3.0):
+    """Wait for queued screen updates to reach the database.
+
+    Only needed when the program is about to exit — for example after piping
+    a file of test commands into manual mode — so the last screen is not lost
+    when the background thread is killed on shutdown.
+    """
+    deadline = time.time() + timeout
+    while not _mirror_jobs.empty() and time.time() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.05)          # let any in-flight write finish
+
+
 def mirror(state, detail, uid=None, name=None, amount=0):
     """Tell the dashboard what the ATM appears to be doing.
 
@@ -89,11 +138,9 @@ def mirror(state, detail, uid=None, name=None, amount=0):
     protocol stays exactly as it was: a GET means a card was tapped, a
     TXN:WDR means cash is being dispensed, a LOCK means the card was blocked.
     """
-    try:
-        database.set_atm_state(state, detail, uid, name, amount,
-                               hold_seconds=HOLD_SECONDS.get(state, 0))
-    except Exception as err:
-        print(f"  !! could not update the monitor: {err}", flush=True)
+    _ensure_mirror_worker()
+    _mirror_jobs.put((state, detail, uid, name, amount,
+                      HOLD_SECONDS.get(state, 0)))
 
 
 # ---------------------------------------------------------------------------
@@ -470,10 +517,12 @@ def run_manual():
             request = input("STM32> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nStopped by user.")
+            mirror_flush()          # let the last screen update land
             return
 
         if request.lower() in ("quit", "exit"):
             print("Bye.")
+            mirror_flush()
             return
         if not request:
             continue
