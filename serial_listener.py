@@ -60,6 +60,23 @@ def log(direction, text):
     print(f"  {direction} {text}", flush=True)
 
 
+# Some screens announce a RESULT and are replaced by the next message almost
+# straight away — the board says "dispensing", then goes back to its menu a
+# moment later. Without a minimum display time the money screen flashes past
+# before the audience can read it. These are the screens worth holding, and
+# for how many seconds.
+HOLD_SECONDS = {
+    "DISPENSE":   3.0,   # the money shot of the demo
+    "TXN_WDR":    3.0,   # same thing, inferred from a TXN when there is no ST:
+    "DEPOSIT":    3.0,
+    "TXN_DEP":    3.0,
+    "LOCKED":     3.0,
+    "PINCHANGED": 2.5,
+    "PIN_CHANGED": 2.5,
+    "THANKS":     2.5,
+}
+
+
 def mirror(state, detail, uid=None, name=None, amount=0):
     """Tell the dashboard what the ATM appears to be doing.
 
@@ -73,7 +90,8 @@ def mirror(state, detail, uid=None, name=None, amount=0):
     TXN:WDR means cash is being dispensed, a LOCK means the card was blocked.
     """
     try:
-        database.set_atm_state(state, detail, uid, name, amount)
+        database.set_atm_state(state, detail, uid, name, amount,
+                               hold_seconds=HOLD_SECONDS.get(state, 0))
     except Exception as err:
         print(f"  !! could not update the monitor: {err}", flush=True)
 

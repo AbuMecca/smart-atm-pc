@@ -11,7 +11,7 @@ The STM32 decides; we just save what it tells us.
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # The database file sits next to this script, so it does not matter which
 # folder you launch python from.
@@ -103,6 +103,21 @@ def init_db():
         (datetime.now().isoformat(timespec="seconds"),),
     )
 
+    # "Hold" columns, added later. Some screens - dispensing cash above all -
+    # are replaced by the next message almost immediately, so without this the
+    # money screen flashes past before anyone can read it. These remember
+    # "keep showing this screen until at least <hold_until>".
+    #
+    # Added with ALTER TABLE rather than by recreating the table, so upgrading
+    # an existing atm.db never loses the real card UIDs already registered.
+    existing = {row["name"] for row in cur.execute("PRAGMA table_info(atm_state)")}
+    for column, column_type in (("hold_state", "TEXT"),
+                                ("hold_detail", "TEXT"),
+                                ("hold_amount", "INTEGER"),
+                                ("hold_until", "TEXT")):
+        if column not in existing:
+            cur.execute(f"ALTER TABLE atm_state ADD COLUMN {column} {column_type}")
+
     conn.commit()
     conn.close()
 
@@ -111,23 +126,48 @@ def init_db():
 # Live ATM state (the monitor panel on the dashboard)
 # ---------------------------------------------------------------------------
 
-def set_atm_state(state, detail, uid=None, name=None, amount=0):
+def set_atm_state(state, detail, uid=None, name=None, amount=0, hold_seconds=0):
     """Record what the ATM is doing right now.
 
     Called by serial_listener.py every time a message arrives from the STM32.
     It never affects the reply sent back to the board — it is purely for the
-    dashboard to look at.
+    screens to look at.
+
+    hold_seconds > 0 marks this as a screen that must stay visible for at
+    least that long. The current state underneath keeps updating normally;
+    the web API simply keeps reporting the held screen until it expires.
+    That is what stops "Dispensing EGP 500" being wiped out by the menu
+    message the board sends a moment later.
     """
+    now = datetime.now()
     conn = get_connection()
-    conn.execute(
-        """
-        UPDATE atm_state
-        SET state = ?, detail = ?, uid = ?, name = ?, amount = ?, updated = ?
-        WHERE id = 1
-        """,
-        (state, detail, uid, name, int(amount or 0),
-         datetime.now().isoformat(timespec="seconds")),
-    )
+
+    if hold_seconds > 0:
+        conn.execute(
+            """
+            UPDATE atm_state
+            SET state = ?, detail = ?, uid = ?, name = ?, amount = ?, updated = ?,
+                hold_state = ?, hold_detail = ?, hold_amount = ?, hold_until = ?
+            WHERE id = 1
+            """,
+            (state, detail, uid, name, int(amount or 0),
+             now.isoformat(timespec="seconds"),
+             state, detail, int(amount or 0),
+             (now + timedelta(seconds=hold_seconds)).isoformat()),
+        )
+    else:
+        # Leave the hold columns alone. An old hold is harmless because the
+        # web API checks whether it has expired before using it.
+        conn.execute(
+            """
+            UPDATE atm_state
+            SET state = ?, detail = ?, uid = ?, name = ?, amount = ?, updated = ?
+            WHERE id = 1
+            """,
+            (state, detail, uid, name, int(amount or 0),
+             now.isoformat(timespec="seconds")),
+        )
+
     conn.commit()
     conn.close()
 

@@ -220,6 +220,26 @@ def api_atm_state():
     except (ValueError, TypeError):
         pass
 
+    # --- Is a "result" screen still being held? --------------------------
+    # The board announces something like DISPENSE and then moves straight back
+    # to its menu, which would wipe the money screen off the display before
+    # anyone could read it. While a hold is live we keep reporting the held
+    # screen; the real state carries on updating underneath and takes over the
+    # moment the hold expires.
+    hold_until = state["hold_until"] if "hold_until" in state.keys() else None
+    if hold_until:
+        try:
+            if datetime.now() < datetime.fromisoformat(hold_until):
+                held = dict(state)
+                held["state"] = state["hold_state"]
+                held["detail"] = state["hold_detail"]
+                held["amount"] = state["hold_amount"] or 0
+                held["seconds_ago"] = seconds_ago
+                held["holding"] = True
+                return jsonify(held)
+        except (ValueError, TypeError):
+            pass          # unreadable timestamp: just fall through as normal
+
     # An old event means the customer has gone; show the machine as idle
     # again. We do not rewrite the database here — the dashboard simply
     # displays it as idle, and the real last event stays in the log.

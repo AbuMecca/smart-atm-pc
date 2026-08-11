@@ -95,7 +95,7 @@ which are unchanged.
 | `ST:PIN` | "Enter your PIN" + empty dots |
 | `ST:PINDOTS:<0-4>` | Fills that many dots (send one per key press) |
 | `ST:WELCOME:<name>` | "Welcome &lt;name&gt;" |
-| `ST:MENU:<name>` | The 1-5 menu |
+| `ST:MENU:<name>` | The menu (1-4, and `*` to eject) |
 | `ST:BALANCE:<n>` | "Your balance: EGP n" |
 | `ST:DISPENSE:<n>` | "Dispensing EGP n" + cash animation |
 | `ST:DEPOSIT:<n>` | "Deposit received: EGP n" |
@@ -112,6 +112,30 @@ Rules for the firmware:
 * An unknown `ST:` message is logged and ignored; it will not crash anything.
 * If the board sends no `ST:` messages at all, the screen still follows along
   roughly, because the listener also infers state from `GET`/`TXN`/`LOCK`.
+
+### Result screens are held on purpose
+
+The board announces something like `ST:DISPENSE:500` and then goes straight
+back to `ST:MENU:Amro`. Without help the money screen would be wiped out
+before anyone could read it — it was, and this is why it looked like the
+dispense screen "did not work".
+
+So the PC guarantees a minimum display time for the screens that announce a
+**result**:
+
+| Screen | Held for |
+|---|---|
+| `DISPENSE`, `DEPOSIT`, `LOCKED` | 3 seconds |
+| `PINCHANGED`, `THANKS` | 2.5 seconds |
+
+Everything else (`PIN`, `PINDOTS`, `MENU`, `BALANCE`, `WRONGPIN`) updates
+instantly, so typing a PIN still feels immediate.
+
+The board does not need to change or wait: it can send its next message
+whenever it likes. The real state carries on updating underneath, and the
+screen catches up the moment the hold expires. The hold lives in `app.py`
+(`/api/atm_state`) and the durations are in `HOLD_SECONDS` at the top of
+`serial_listener.py`.
 
 After 60 seconds with nothing arriving, the screen returns to the attract
 screen by itself.
