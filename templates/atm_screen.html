@@ -137,6 +137,32 @@ const SCREENS = {
            <div class="line-amount">EGP ${money(s.amount)}</div>`
   }),
 
+  // --- Typing an amount, digit by digit -------------------------------
+  ASKAMT_WDR: (s) => ({
+    html: `<div class="line-main">WITHDRAW</div>
+           <div class="line-amount">EGP ${Number(s.amount) ? money(s.amount) : "_"}</div>
+           <div class="line-sub">Enter the amount on the keypad</div>`
+  }),
+
+  ASKAMT_DEP: (s) => ({
+    html: `<div class="line-main">DEPOSIT</div>
+           <div class="line-amount">EGP ${Number(s.amount) ? money(s.amount) : "_"}</div>
+           <div class="line-sub">Enter the amount on the keypad</div>`
+  }),
+
+  // --- Choosing a new PIN ----------------------------------------------
+  NEWPIN: (s) => ({
+    html: `<div class="line-main">ENTER YOUR NEW PIN</div>
+           ${pinDots(s.amount || 0)}
+           <div class="line-sub">4 digits</div>`
+  }),
+
+  CONFIRMPIN: (s) => ({
+    html: `<div class="line-main">RE-ENTER YOUR NEW PIN</div>
+           ${pinDots(s.amount || 0)}
+           <div class="line-sub">Type it once more to confirm</div>`
+  }),
+
   DISPENSE: (s) => ({
     html: `<div class="line-main">DISPENSING</div>
            <div class="line-amount">EGP ${money(s.amount)}</div>

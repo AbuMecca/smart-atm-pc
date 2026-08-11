@@ -93,6 +93,13 @@ HOLD_SECONDS = {
 _mirror_jobs = queue.Queue()
 _mirror_thread = None
 
+# The last screen we asked for, kept here in memory as well as in the database.
+# PINDOTS and AMT need to know "which screen are we on?" so they can update
+# just the digits. They must NOT read that back from the database, because the
+# write above is asynchronous and might not have landed yet.
+_last_screen = {"state": "IDLE", "detail": "Idle - waiting for card",
+                "uid": None, "name": None, "amount": 0}
+
 
 def _mirror_worker():
     """Write queued screen updates, one at a time, off the reply path."""
@@ -138,6 +145,8 @@ def mirror(state, detail, uid=None, name=None, amount=0):
     protocol stays exactly as it was: a GET means a card was tapped, a
     TXN:WDR means cash is being dispensed, a LOCK means the card was blocked.
     """
+    _last_screen.update(state=state, detail=detail, uid=uid,
+                        name=name, amount=amount)
     _ensure_mirror_worker()
     _mirror_jobs.put((state, detail, uid, name, amount,
                       HOLD_SECONDS.get(state, 0)))
@@ -168,21 +177,43 @@ def handle_status(parts):
         mirror(screen, f"{screen.title()} - {value}", name=value)
         return
 
-    # Screens that carry a number (money, tries left, or how many PIN dots).
-    if screen in ("BALANCE", "DISPENSE", "DEPOSIT", "WRONGPIN", "PINDOTS"):
+    # "Now type an amount" — the withdraw / deposit prompt.
+    if screen == "ASKAMT":
+        if value.upper() == "DEP":
+            mirror("ASKAMT_DEP", "Entering a deposit amount", amount=0)
+        else:
+            mirror("ASKAMT_WDR", "Entering a withdrawal amount", amount=0)
+        return
+
+    # Screens that carry a number (money, tries left, PIN dots, or the amount
+    # typed so far).
+    if screen in ("BALANCE", "DISPENSE", "DEPOSIT", "WRONGPIN", "PINDOTS", "AMT"):
         try:
             number = int(value)
         except ValueError:
             number = 0
 
         if screen == "PINDOTS":
-            # Not a screen change: the customer is still on the PIN screen,
-            # they have just pressed another key. Keep the state as PIN and
-            # only move the dot count, so the screen does not flicker.
-            state = database.get_atm_state() or {}
-            mirror("PIN", "Enter your PIN",
-                   uid=state.get("uid"), name=state.get("name"),
+            # Not a screen change: the customer is still on a PIN screen and
+            # has just pressed another key. Keep whichever PIN screen we are
+            # on and only move the dot count, so it does not flicker.
+            current = _last_screen["state"]
+            if current not in ("PIN", "NEWPIN", "CONFIRMPIN"):
+                current = "PIN"
+            mirror(current, _last_screen["detail"],
+                   uid=_last_screen["uid"], name=_last_screen["name"],
                    amount=max(0, min(number, 4)))
+            return
+
+        if screen == "AMT":
+            # Same idea for the amount being typed: stay on the withdraw or
+            # deposit prompt and just update the digits shown.
+            current = _last_screen["state"]
+            if current not in ("ASKAMT_WDR", "ASKAMT_DEP"):
+                current = "ASKAMT_WDR"
+            mirror(current, _last_screen["detail"],
+                   uid=_last_screen["uid"], name=_last_screen["name"],
+                   amount=max(0, number))
             return
 
         wording = {
@@ -198,6 +229,8 @@ def handle_status(parts):
     plain = {
         "IDLE":       "Idle - waiting for card",
         "PIN":        "Enter your PIN",
+        "NEWPIN":     "Choosing a new PIN",
+        "CONFIRMPIN": "Confirming the new PIN",
         "LOCKED":     "Card locked",
         "PINCHANGED": "PIN changed successfully",
         "THANKS":     "Thank you - please take your card",
@@ -506,8 +539,10 @@ def run_manual():
     print(" SCREEN messages (one-way; drive the /atm mirror, no reply sent):")
     print("   ST:IDLE            ST:PIN             ST:PINDOTS:3")
     print("   ST:WELCOME:Amro    ST:MENU:Amro       ST:BALANCE:2000")
+    print("   ST:ASKAMT:WDR      ST:ASKAMT:DEP      ST:AMT:250")
+    print("   ST:NEWPIN          ST:CONFIRMPIN      ST:PINCHANGED")
     print("   ST:DISPENSE:500    ST:DEPOSIT:200     ST:WRONGPIN:2")
-    print("   ST:LOCKED          ST:PINCHANGED      ST:THANKS")
+    print("   ST:LOCKED          ST:THANKS")
     print()
     print(" Watch http://localhost:5000/atm while you type these.")
     print(" Type 'quit' to exit.\n")

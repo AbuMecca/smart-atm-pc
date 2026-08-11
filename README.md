@@ -97,6 +97,11 @@ which are unchanged.
 | `ST:WELCOME:<name>` | "Welcome &lt;name&gt;" |
 | `ST:MENU:<name>` | The menu (1-4, and `*` to eject) |
 | `ST:BALANCE:<n>` | "Your balance: EGP n" |
+| `ST:ASKAMT:WDR` | "WITHDRAW — enter the amount" |
+| `ST:ASKAMT:DEP` | "DEPOSIT — enter the amount" |
+| `ST:AMT:<n>` | The amount typed so far (send after each digit) |
+| `ST:NEWPIN` | "Enter your new PIN" + dots |
+| `ST:CONFIRMPIN` | "Re-enter your new PIN" + dots |
 | `ST:DISPENSE:<n>` | "Dispensing EGP n" + cash animation |
 | `ST:DEPOSIT:<n>` | "Deposit received: EGP n" |
 | `ST:WRONGPIN:<k>` | "Wrong PIN - k tries left" (amber) |
@@ -108,7 +113,11 @@ Rules for the firmware:
 
 * **Never wait for a reply to an `ST:` message.** The PC sends nothing back.
 * `ST:PIN` resets the dots to zero, so send it when PIN entry starts.
-* Send `ST:PINDOTS:1`, `:2`, `:3`, `:4` as each digit is pressed.
+* Send `ST:PINDOTS:1`, `:2`, `:3`, `:4` as each digit is pressed. This
+  works for the login PIN **and** for `ST:NEWPIN` / `ST:CONFIRMPIN` — it
+  fills dots on whichever PIN screen is showing.
+* For amounts, send `ST:ASKAMT:WDR` (or `:DEP`) when the prompt appears,
+  then `ST:AMT:<total so far>` after each digit — e.g. `2`, `25`, `250`.
 * An unknown `ST:` message is logged and ignored; it will not crash anything.
 * If the board sends no `ST:` messages at all, the screen still follows along
   roughly, because the listener also infers state from `GET`/`TXN`/`LOCK`.
