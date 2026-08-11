@@ -43,7 +43,7 @@ import database
 # CHANGE THIS to match your board.
 #   Windows: "COM3", "COM4", ...        Linux/Mac: "/dev/ttyUSB0", "/dev/ttyACM0"
 # ---------------------------------------------------------------------------
-SERIAL_PORT = "COM3"
+SERIAL_PORT = "COM5"
 BAUD_RATE = 9600          # 8N1 is pyserial's default, so we only set the speed
 READ_TIMEOUT = 1          # seconds; lets us notice Ctrl+C between lines
 
@@ -76,6 +76,74 @@ def mirror(state, detail, uid=None, name=None, amount=0):
         database.set_atm_state(state, detail, uid, name, amount)
     except Exception as err:
         print(f"  !! could not update the monitor: {err}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# ST: status messages — the STM32 telling the big screen what it is showing
+# ---------------------------------------------------------------------------
+
+def handle_status(parts):
+    """Record one ST: status message so the /atm mirror screen can show it.
+
+    parts is the already-split message, e.g. ["ST", "DISPENSE", "500"].
+
+    These messages are ONE-WAY. Nothing is sent back to the board, and nothing
+    here changes an account. If this function did nothing at all, the ATM
+    would still work perfectly — the screen would just stop updating.
+
+    A note on names: cardholder names are letters and spaces only, so a name
+    can never contain a ':'. We still re-join the tail with ':' rather than
+    taking parts[2], so an unexpected value can never silently lose data.
+    """
+    screen = parts[1].upper() if len(parts) > 1 else ""
+    value = ":".join(parts[2:]) if len(parts) > 2 else ""
+
+    # Screens that carry a person's name.
+    if screen in ("WELCOME", "MENU"):
+        mirror(screen, f"{screen.title()} - {value}", name=value)
+        return
+
+    # Screens that carry a number (money, tries left, or how many PIN dots).
+    if screen in ("BALANCE", "DISPENSE", "DEPOSIT", "WRONGPIN", "PINDOTS"):
+        try:
+            number = int(value)
+        except ValueError:
+            number = 0
+
+        if screen == "PINDOTS":
+            # Not a screen change: the customer is still on the PIN screen,
+            # they have just pressed another key. Keep the state as PIN and
+            # only move the dot count, so the screen does not flicker.
+            state = database.get_atm_state() or {}
+            mirror("PIN", "Enter your PIN",
+                   uid=state.get("uid"), name=state.get("name"),
+                   amount=max(0, min(number, 4)))
+            return
+
+        wording = {
+            "BALANCE":  f"Balance shown: EGP {number:,}",
+            "DISPENSE": f"Dispensing EGP {number:,}",
+            "DEPOSIT":  f"Deposit received: EGP {number:,}",
+            "WRONGPIN": f"Wrong PIN - {number} tries left",
+        }[screen]
+        mirror(screen, wording, amount=number)
+        return
+
+    # Screens that carry nothing at all.
+    plain = {
+        "IDLE":       "Idle - waiting for card",
+        "PIN":        "Enter your PIN",
+        "LOCKED":     "Card locked",
+        "PINCHANGED": "PIN changed successfully",
+        "THANKS":     "Thank you - please take your card",
+    }
+    if screen in plain:
+        # Starting PIN entry resets the dots back to zero.
+        mirror(screen, plain[screen])
+        return
+
+    # Unknown ST: message. Log it and carry on; never crash the listener.
+    print(f"  ?? unknown status message: ST:{screen}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +255,18 @@ def handle_line(line):
             mirror("LOCKED", f"Card locked: {account['name']}",
                    uid=uid, name=account["name"])
             return "OK"
+
+        # --- ST:<screen>[:<value>] -----------------------------------------
+        # ONE-WAY STATUS MESSAGES.
+        #
+        # These are not requests and they are NOT part of the request/response
+        # contract above. The STM32 shouts them out as it moves through its
+        # own flow, purely so the big PC screen can mirror what the little
+        # 16x2 LCD is showing. We record the state and return None, which
+        # means "say nothing back" - the board is not waiting for a reply.
+        if command == "ST":
+            handle_status(parts)
+            return None
 
         # Anything else is not part of the contract.
         return "ERR"
@@ -350,13 +430,21 @@ def run_manual():
     print("=" * 62)
     print(" MANUAL MODE - type requests as if you were the STM32")
     print("=" * 62)
-    print(" Try these:")
+    print(" DATA requests (the PC answers each one):")
     print("   GET:A1B2C3D4")
     print("   TXN:A1B2C3D4:WDR:500:1500")
     print("   TXN:A1B2C3D4:DEP:200:1700")
     print("   PIN:A1B2C3D4:4321")
     print("   LOCK:11223344")
     print("   GET:FFFFFFFF          (unknown card -> NONE)")
+    print()
+    print(" SCREEN messages (one-way; drive the /atm mirror, no reply sent):")
+    print("   ST:IDLE            ST:PIN             ST:PINDOTS:3")
+    print("   ST:WELCOME:Amro    ST:MENU:Amro       ST:BALANCE:2000")
+    print("   ST:DISPENSE:500    ST:DEPOSIT:200     ST:WRONGPIN:2")
+    print("   ST:LOCKED          ST:PINCHANGED      ST:THANKS")
+    print()
+    print(" Watch http://localhost:5000/atm while you type these.")
     print(" Type 'quit' to exit.\n")
 
     while True:

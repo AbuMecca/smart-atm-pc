@@ -1,11 +1,11 @@
 @echo off
 REM ===========================================================================
-REM  3_ADMIN.bat  -  BANK STAFF ONLY
+REM  ADMIN.bat  -  BANK STAFF ONLY
 REM
 REM  The cardholder administration menu: list, add, edit a balance,
 REM  lock / unlock, delete, and view recent transactions.
 REM
-REM  It works whether or not the bank is running, because it edits the
+REM  It works whether or not the demo is running, because it edits the
 REM  database file directly.
 REM ===========================================================================
 

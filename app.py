@@ -67,6 +67,20 @@ def dashboard():
     return render_template("dashboard.html")
 
 
+@app.route("/atm")
+def atm_screen():
+    """The big ATM screen — a LIVE MIRROR of what the STM32 is showing.
+
+    This page is display only. It has no keypad that does anything and it
+    makes no decisions. It polls /api/atm_state four times a second and draws
+    whatever screen the board last reported through its ST: messages.
+
+    Put this on the projector full-screen (F11). The customer still uses the
+    real card and the real keypad on the STM32.
+    """
+    return render_template("atm_screen.html")
+
+
 @app.route("/admin")
 def admin():
     """Cardholder management screen for bank staff."""
@@ -172,9 +186,11 @@ def api_get_transactions():
 # JSON API — the live ATM monitor
 # ---------------------------------------------------------------------------
 
-# If nothing has arrived from the STM32 for this long, the ATM has clearly
-# finished serving whoever was there, so the monitor drops back to "Idle".
-IDLE_AFTER_SECONDS = 25
+# If nothing has arrived from the STM32 for this long, the customer has
+# clearly walked away, so the screen goes back to the attract screen.
+# It is generous on purpose: someone reading the menu or thinking about their
+# PIN should not have the screen reset underneath them.
+IDLE_AFTER_SECONDS = 60
 
 
 @app.route("/api/atm_state", methods=["GET"])

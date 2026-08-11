@@ -1,0 +1,280 @@
+/* ==========================================================================
+   atm.css — the big ATM screen (/atm)
+
+   A deliberately different look from the rest of the site: this is the
+   CUSTOMER's screen, so it is a dark cabinet with a green phosphor display,
+   built to be readable from the back of a room on a projector.
+
+   Everything here is presentation only. No part of this page decides
+   anything — it just draws whatever the STM32 last reported.
+   ========================================================================== */
+
+:root {
+  --cabinet:   #0d1b2a;   /* the machine's body            */
+  --cabinet-2: #132639;   /* raised panels                 */
+  --screen-bg: #04150c;   /* inside of the display         */
+  --green:     #7CFFA0;   /* phosphor text                 */
+  --green-dim: #3f7f57;   /* faded phosphor                */
+  --amber:     #ffc857;   /* warnings                      */
+  --red:       #ff6b5e;   /* errors / locked               */
+  --cash:      #b8e986;   /* banknotes                     */
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--cabinet);
+  font-family: Consolas, "Courier New", monospace;
+  overflow: hidden;                 /* never scroll on a projector */
+}
+
+/* The whole machine fills the window. */
+.machine {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 2vh 3vw;
+  gap: 1.6vh;
+}
+
+/* ---------- Bank header ---------- */
+.bank-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+}
+
+.bank-name {
+  display: flex; align-items: center; gap: 1.2vw;
+  color: #fff;
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-weight: 700;
+  font-size: clamp(18px, 2.6vw, 40px);
+  letter-spacing: .12em;
+}
+
+.bank-logo {
+  width: clamp(34px, 3.4vw, 58px);
+  height: clamp(34px, 3.4vw, 58px);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--cabinet);
+  display: flex; align-items: center; justify-content: center;
+  font-size: clamp(15px, 1.5vw, 24px);
+  letter-spacing: 0;
+}
+
+/* "LINKED" lamp: green when the screen is receiving, red if the poll fails. */
+.link-lamp {
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: clamp(10px, .95vw, 15px);
+  letter-spacing: .18em;
+  color: var(--green-dim);
+  border: 1px solid currentColor;
+  border-radius: 20px;
+  padding: .4em 1.1em;
+  transition: color .3s;
+}
+.link-lamp.offline { color: var(--red); }
+
+/* ---------- The display ---------- */
+.screen-frame {
+  flex: 1 1 auto;
+  min-height: 0;                     /* lets the flex child shrink properly */
+  background: var(--screen-bg);
+  border: .5vh solid #061f11;
+  border-radius: 1.2vh;
+  box-shadow: inset 0 0 8vh rgba(124, 255, 160, .07),
+              0 1vh 3vh rgba(0, 0, 0, .5);
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 3vh 3vw;
+}
+
+/* Faint horizontal scan lines, for the old-terminal feel. */
+.screen-frame::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0) 0 3px,
+      rgba(0, 0, 0, .22) 3px 4px);
+  pointer-events: none;
+}
+
+.screen-content { width: 100%; }
+
+/* The main line of text. clamp() keeps it huge but never overflowing. */
+.line-main {
+  color: var(--green);
+  font-size: clamp(26px, 5.2vw, 86px);
+  font-weight: 700;
+  line-height: 1.15;
+  text-shadow: 0 0 2.5vh rgba(124, 255, 160, .35);
+  word-break: break-word;
+}
+
+.line-sub {
+  color: var(--green-dim);
+  font-size: clamp(14px, 1.9vw, 30px);
+  margin-top: 2.2vh;
+  letter-spacing: .06em;
+}
+
+/* A big number (balance, amount dispensed). */
+.line-amount {
+  color: var(--green);
+  font-size: clamp(40px, 9vw, 150px);
+  font-weight: 700;
+  line-height: 1.05;
+  margin-top: 1.5vh;
+  text-shadow: 0 0 3.5vh rgba(124, 255, 160, .45);
+}
+
+.tone-warn   .line-main, .tone-warn   .line-amount { color: var(--amber); }
+.tone-warn   .line-sub  { color: #a97e29; }
+.tone-danger .line-main, .tone-danger .line-amount { color: var(--red); }
+.tone-danger .line-sub  { color: #a1443c; }
+
+/* ---------- The menu ---------- */
+.menu-list {
+  list-style: none;
+  margin: 3vh auto 0;
+  padding: 0;
+  display: inline-block;
+  text-align: left;
+}
+.menu-list li {
+  color: var(--green);
+  font-size: clamp(17px, 2.7vw, 42px);
+  line-height: 1.75;
+  letter-spacing: .04em;
+}
+.menu-key {
+  display: inline-block;
+  min-width: 2.2em;
+  color: var(--screen-bg);
+  background: var(--green);
+  border-radius: .18em;
+  text-align: center;
+  margin-right: .7em;
+  font-weight: 700;
+}
+
+/* ---------- Masked PIN dots ---------- */
+.pin-dots {
+  margin-top: 4vh;
+  display: flex;
+  gap: 2.2vw;
+  justify-content: center;
+}
+.pin-dot {
+  width: clamp(20px, 3.2vw, 54px);
+  height: clamp(20px, 3.2vw, 54px);
+  border-radius: 50%;
+  border: .35vh solid var(--green-dim);
+  transition: background .12s, border-color .12s;
+}
+.pin-dot.filled {
+  background: var(--green);
+  border-color: var(--green);
+  box-shadow: 0 0 2.5vh rgba(124, 255, 160, .6);
+}
+
+/* ---------- Cash dispensing animation ---------- */
+.cash-slot {
+  margin-top: 4vh;
+  height: clamp(60px, 12vh, 130px);
+  position: relative;
+}
+
+/* Each note slides down out of the slot and fades away. */
+.note {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: clamp(90px, 13vw, 210px);
+  height: clamp(42px, 6vw, 96px);
+  margin-left: calc(clamp(90px, 13vw, 210px) / -2);
+  background: linear-gradient(160deg, var(--cash), #86c95d);
+  border: 2px solid #5f9c3c;
+  border-radius: 6px;
+  box-shadow: 0 .6vh 1.6vh rgba(0, 0, 0, .45);
+  display: flex; align-items: center; justify-content: center;
+  color: #24401a;
+  font-weight: 700;
+  font-size: clamp(12px, 1.5vw, 24px);
+  opacity: 0;
+  animation: dispense 1.5s ease-in infinite;
+}
+.note:nth-child(2) { animation-delay: .3s; }
+.note:nth-child(3) { animation-delay: .6s; }
+
+@keyframes dispense {
+  0%   { transform: translateY(-40%) rotate(-3deg) scale(.92); opacity: 0; }
+  25%  { opacity: 1; }
+  70%  { transform: translateY(75%) rotate(2deg) scale(1); opacity: 1; }
+  100% { transform: translateY(130%) rotate(4deg) scale(1); opacity: 0; }
+}
+
+/* ---------- Decorative keypad (does NOTHING) ---------- */
+/* The real keypad is the physical one on the STM32. This is only here so the
+   machine looks like a machine; there are no click handlers anywhere. */
+.keypad-strip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2vw;
+}
+
+.keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: .7vh .7vw;
+}
+.keypad span {
+  width: clamp(30px, 3.6vw, 62px);
+  height: clamp(24px, 3vh, 46px);
+  border-radius: .5vh;
+  background: var(--cabinet-2);
+  border: 1px solid #1e3450;
+  color: #5a7a99;
+  display: flex; align-items: center; justify-content: center;
+  font-size: clamp(11px, 1.2vw, 20px);
+}
+
+.slot-label {
+  color: var(--green-dim);
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: clamp(10px, 1vw, 16px);
+  letter-spacing: .18em;
+  text-align: right;
+  line-height: 1.9;
+}
+.card-slot, .cash-tray {
+  height: 1.1vh;
+  background: #000;
+  border-radius: 4px;
+  box-shadow: inset 0 .3vh .6vh rgba(0, 0, 0, .9);
+  margin-top: .5vh;
+}
+.card-slot { width: clamp(90px, 11vw, 190px); }
+.cash-tray { width: clamp(130px, 17vw, 280px); }
+
+/* A quiet reminder that this screen is only a mirror. */
+.mirror-note {
+  flex: 0 0 auto;
+  text-align: center;
+  color: #33506b;
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: clamp(9px, .85vw, 13px);
+  letter-spacing: .1em;
+}

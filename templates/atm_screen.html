@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AAST Bank — ATM</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='atm.css') }}">
+</head>
+<body>
+
+<!--
+  THE BIG ATM SCREEN — a live mirror of the STM32.
+
+  This page is DISPLAY ONLY:
+    * it has no buttons and no click handlers anywhere;
+    * the keypad drawn at the bottom is a picture, nothing more;
+    * it makes no decisions and can send nothing to the board.
+
+  All it does is ask /api/atm_state four times a second and draw whichever
+  screen the STM32 last reported with an ST: message. The customer uses the
+  real card and the real keypad on the hardware.
+
+  Press F11 for full screen on the projector.
+-->
+
+<div class="machine">
+
+  <header class="bank-header">
+    <div class="bank-name">
+      <span class="bank-logo">AB</span>
+      <span>AAST BANK</span>
+    </div>
+    <div class="link-lamp" id="link-lamp">LINKED</div>
+  </header>
+
+  <!-- Everything inside here is replaced on each poll. -->
+  <main class="screen-frame" id="screen-frame">
+    <div class="screen-content" id="screen-content">
+      <div class="line-main">STARTING UP</div>
+      <div class="line-sub">Connecting to the bank&hellip;</div>
+    </div>
+  </main>
+
+  <!-- Decorative only. There is deliberately no JavaScript attached here. -->
+  <div class="keypad-strip">
+    <div class="keypad" aria-hidden="true">
+      <span>1</span><span>2</span><span>3</span>
+      <span>4</span><span>5</span><span>6</span>
+      <span>7</span><span>8</span><span>9</span>
+      <span>*</span><span>0</span><span>#</span>
+    </div>
+    <div class="slot-label">
+      CARD<div class="card-slot"></div>
+      CASH<div class="cash-tray"></div>
+    </div>
+  </div>
+
+  <div class="mirror-note">
+    LIVE MIRROR OF THE STM32 &mdash; DISPLAY ONLY. THE BOARD MAKES EVERY DECISION.
+  </div>
+
+</div>
+
+<script>
+// ===========================================================================
+// Poll the bank 4 times a second and draw the matching screen.
+//
+// There is no logic here beyond "which HTML goes with which state" — every
+// decision was already made by the STM32 before the message reached us.
+// ===========================================================================
+
+const REFRESH_MS = 250;          // 4 times a second
+
+/** Escape text before putting it in the page. */
+function esc(text) {
+  return String(text == null ? "" : text).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+function money(value) {
+  return Number(value || 0).toLocaleString("en-US");
+}
+
+/** Four dots, the first `filled` of them lit. */
+function pinDots(filled) {
+  let html = '<div class="pin-dots">';
+  for (let i = 0; i < 4; i++) {
+    html += `<div class="pin-dot ${i < filled ? "filled" : ""}"></div>`;
+  }
+  return html + "</div>";
+}
+
+/** Three banknotes sliding out of the slot. */
+function cashAnimation() {
+  return '<div class="cash-slot">' +
+         '<div class="note">EGP</div>' +
+         '<div class="note">EGP</div>' +
+         '<div class="note">EGP</div>' +
+         '</div>';
+}
+
+// ---------------------------------------------------------------------------
+// One entry per screen the STM32 can ask for.
+// Each returns { html, tone } — tone tints the screen for warnings/errors.
+// ---------------------------------------------------------------------------
+const SCREENS = {
+  IDLE: () => ({
+    html: `<div class="line-main">PLEASE TAP YOUR CARD</div>
+           <div class="line-sub">Welcome to AAST Bank &mdash; available 24 hours</div>`
+  }),
+
+  PIN: (s) => ({
+    html: `<div class="line-main">ENTER YOUR PIN</div>
+           ${pinDots(s.amount || 0)}
+           <div class="line-sub">Use the keypad on the machine</div>`
+  }),
+
+  WELCOME: (s) => ({
+    html: `<div class="line-main">WELCOME</div>
+           <div class="line-amount">${esc(s.name || "")}</div>`
+  }),
+
+  MENU: (s) => ({
+    html: `<div class="line-main">${esc(s.name || "")}, please choose</div>
+           <ul class="menu-list">
+             <li><span class="menu-key">1</span>Balance</li>
+             <li><span class="menu-key">2</span>Withdraw</li>
+             <li><span class="menu-key">3</span>Deposit</li>
+             <li><span class="menu-key">4</span>Change PIN</li>
+             <li><span class="menu-key">5</span>Eject card</li>
+           </ul>`
+  }),
+
+  BALANCE: (s) => ({
+    html: `<div class="line-main">YOUR BALANCE</div>
+           <div class="line-amount">EGP ${money(s.amount)}</div>`
+  }),
+
+  DISPENSE: (s) => ({
+    html: `<div class="line-main">DISPENSING</div>
+           <div class="line-amount">EGP ${money(s.amount)}</div>
+           ${cashAnimation()}
+           <div class="line-sub">Please take your cash</div>`
+  }),
+
+  DEPOSIT: (s) => ({
+    html: `<div class="line-main">DEPOSIT RECEIVED</div>
+           <div class="line-amount">EGP ${money(s.amount)}</div>`
+  }),
+
+  WRONGPIN: (s) => ({
+    tone: "tone-warn",
+    html: `<div class="line-main">WRONG PIN</div>
+           <div class="line-amount">${money(s.amount)}</div>
+           <div class="line-sub">${Number(s.amount) === 1 ? "try" : "tries"} remaining</div>`
+  }),
+
+  LOCKED: () => ({
+    tone: "tone-danger",
+    html: `<div class="line-main">CARD LOCKED</div>
+           <div class="line-sub">Please contact your branch</div>`
+  }),
+
+  PINCHANGED: () => ({
+    html: `<div class="line-main">PIN CHANGED</div>
+           <div class="line-sub">Please remember your new PIN</div>`
+  }),
+
+  THANKS: () => ({
+    html: `<div class="line-main">THANK YOU</div>
+           <div class="line-sub">Please take your card</div>`
+  }),
+
+  // --- These come from the DATA messages (GET/TXN/LOCK), not ST:.
+  // The board normally sends its own ST: screen too, but if it does not,
+  // showing something sensible is better than showing nothing.
+  CARD_READ:    (s) => SCREENS.WELCOME(s),
+  UNKNOWN_CARD: () => ({
+    tone: "tone-warn",
+    html: `<div class="line-main">CARD NOT RECOGNISED</div>
+           <div class="line-sub">Please take your card</div>`
+  }),
+  CARD_BLOCKED: () => SCREENS.LOCKED(),
+  TXN_WDR:      (s) => SCREENS.DISPENSE(s),
+  TXN_DEP:      (s) => SCREENS.DEPOSIT(s),
+  PIN_CHANGED:  () => SCREENS.PINCHANGED()
+};
+
+// Remember what we drew last, so we only touch the DOM when it changes.
+// Without this the cash animation would restart four times a second.
+let lastKey = null;
+
+function draw(state) {
+  const build = SCREENS[state.state] || SCREENS.IDLE;
+  const screen = build(state);
+
+  // A key that captures everything visible on screen.
+  const key = [state.state, state.name, state.amount].join("|");
+  if (key === lastKey) return;
+  lastKey = key;
+
+  const frame = document.getElementById("screen-frame");
+  frame.className = "screen-frame " + (screen.tone || "");
+  document.getElementById("screen-content").innerHTML = screen.html;
+}
+
+function setLinked(ok) {
+  const lamp = document.getElementById("link-lamp");
+  lamp.textContent = ok ? "LINKED" : "NO LINK";
+  lamp.className = "link-lamp" + (ok ? "" : " offline");
+}
+
+async function poll() {
+  try {
+    const response = await fetch("/api/atm_state", { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    draw(await response.json());
+    setLinked(true);
+  } catch (err) {
+    // The website went away. Say so rather than freezing on a stale screen.
+    setLinked(false);
+  }
+}
+
+poll();
+setInterval(poll, REFRESH_MS);
+</script>
+</body>
+</html>

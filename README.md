@@ -16,97 +16,115 @@ The ATM itself is an **STM32** microcontroller (keypad, LCD, RFID reader, servo)
 
 ---
 
-## 0. QUICK START — what to open, in what order
+## 0. QUICK START
 
-The system is **three separate programs**, deliberately kept apart so a
-customer at the cash machine never sees the bank's screens.
+**Double-click `DEMO.bat`.** That is the whole demo.
 
-| # | Double-click | What it is | Who uses it |
-|---|---|---|---|
-| 1 | **`1_BANK.bat`** | The bank: website + ATM link | start this first |
-| 2 | **`2_ATM.bat`** | The cash machine | the customer |
-| 3 | **`3_ADMIN.bat`** | Cardholder admin menu | bank staff |
-| — | **`STOP.bat`** | Closes everything | |
+It starts the website and the STM32 serial listener, then opens the big ATM
+screen in your browser. Press **F11** for full screen on the projector.
 
-**The normal demo is just: double-click `1_BANK.bat`, then `2_ATM.bat`.**
-
-* `1_BANK.bat` opens two black windows and your browser at
-  **http://localhost:5000** — the staff dashboard.
-* `2_ATM.bat` opens the ATM screen. Click a card to tap it, type the PIN on
-  the keypad, use the menu.
-
-You can open `2_ATM.bat` twice to run two cash machines at once.
-
-### Who sees what
-
-| | Customer ATM (`2_ATM.bat`) | Staff dashboard (`localhost:5000`) |
-|---|---|---|
-| The card in the machine | yes | — |
-| That card's balance | yes, after the PIN | — |
-| **Everyone else's accounts** | **never** | yes |
-| **The bank's transaction list** | **never** | yes |
-| Live ATM status | — | yes |
-
-The ATM only ever knows about the one card in the slot. It asks the bank for
-that single record and nothing else, so there is no way for a customer to see
-another person's money.
-
-> **Two keys on the ATM, for your presentation:**
-> **F2** shows/hides the serial monitor (the raw protocol traffic — hidden by
-> default so it looks like a real cash machine). **F11** is full screen.
-
-### If the ATM says OUT OF SERVICE
-
-It cannot reach the bank. Start `1_BANK.bat`. **You do not need to restart the
-ATM** — it keeps trying in the background and opens for business by itself a
-few seconds after the bank appears.
-
----
-
-## 1. What each file does
-
-| File | What it does |
+| Double-click | What it does |
 |---|---|
-| `app.py` | The Flask web server: the dashboard page plus the JSON APIs it polls. |
-| `database.py` | Every SQLite query lives here. Also turns on WAL mode (see §7). |
-| `serial_listener.py` | The UART loop. Implements the 4 protocol commands. **COM port constant is at the top.** |
-| `admin_cli.py` | **The bank staff admin tool** — a menu in the terminal. |
-| `seed.py` | Creates `atm.db` and inserts the 3 sample cardholders. |
-| `atm_gui.py` | **The cash machine** the customer uses. |
-| `1_BANK.bat` | Starts the bank (website + ATM link). |
-| `2_ATM.bat` | Starts a cash machine. |
-| `3_ADMIN.bat` | Starts the admin menu. |
-| `STOP.bat` | Closes everything. |
-| `templates/dashboard.html` | The operations dashboard + live ATM monitor. |
-| `templates/admin.html` | Optional web admin page (the CLI is the primary one now). |
-| `static/style.css` | The navy/blue bank theme. |
-| `atm.db` | The database file itself (created by `seed.py`). |
-| `show_db.py` | Prints the raw database in the terminal, no web server needed. |
-| `atm_sim.py` | A full ATM session simulated in the terminal (no hardware). |
-| `atm_core.py` | The ATM's decision rules, shared by both simulators. |
-| `fake_stm32.py` | Low-level tool: send one raw protocol line, see the reply. |
+| **`DEMO.bat`** | Starts everything and opens the ATM screen |
+| **`ADMIN.bat`** | Cardholder admin menu (bank staff) |
+| **`STOP.bat`** | Closes everything |
+
+### The two screens
+
+| Page | Who it is for | What it shows |
+|---|---|---|
+| **http://localhost:5000/atm** | the audience / customer | A live mirror of the STM32's screen. Big green ATM display. |
+| **http://localhost:5000** | bank staff | All accounts, live transactions, ATM status |
+
+Put `/atm` on the projector. Keep the dashboard on your laptop if you want to
+show both.
+
+### The ATM screen is a MIRROR, not a program
+
+This is the most important thing to explain:
+
+* The customer uses **the real card and the real keypad on the STM32**.
+* The board decides everything and drives its own flow.
+* As it goes, it shouts one-way `ST:` status messages down the serial cable.
+* The web page just draws whichever screen was last reported.
+
+The page has **no keypad that works** (the one drawn at the bottom is a
+picture), no buttons, no inputs and no forms. **If the screen were switched
+off entirely, the ATM would carry on working perfectly.**
 
 ---
 
-## 2. Running it — the one-click way
+## 1. Demoing without the STM32
 
-See **§0** above: `1_BANK.bat`, then `2_ATM.bat`. That is the whole thing.
+You do not need the board to show the screen working.
 
-`1_BANK.bat` picks a `.venv` if you have one, otherwise the `py` launcher,
-installs Flask and pyserial the first time, and creates `atm.db` if it is
-missing. So a fresh Windows PC needs nothing but Python installed.
+`DEMO.bat` starts the listener in COM-port mode. If no board is connected it
+prints that it could not open the port and drops into **manual mode**. Type
+these into the **"AAST Bank - STM32 Link"** window and watch the big screen:
+
+```
+ST:IDLE
+ST:PIN
+ST:PINDOTS:1
+ST:PINDOTS:4
+ST:WRONGPIN:2
+ST:WELCOME:Amro
+ST:MENU:Amro
+ST:BALANCE:2000
+ST:DISPENSE:500
+ST:THANKS
+```
+
+`ST:DISPENSE:500` is the good one for the audience: big amount plus banknotes
+sliding out of the slot.
+
+The same window still accepts the data requests (`GET:A1B2C3D4`,
+`TXN:A1B2C3D4:WDR:500:1500`, ...) if you want to show the database changing.
 
 ---
 
-## 3. Running it — by hand (so you understand it)
+## 2. The status messages (`ST:`)
 
-Open a terminal (press `Win`, type `powershell`, press Enter):
+These are **new, one-way, and never answered**. The board sends them purely so
+the screen can follow along. They are separate from the four data commands,
+which are unchanged.
+
+| Message | Screen shows |
+|---|---|
+| `ST:IDLE` | "Please tap your card" (attract screen) |
+| `ST:PIN` | "Enter your PIN" + empty dots |
+| `ST:PINDOTS:<0-4>` | Fills that many dots (send one per key press) |
+| `ST:WELCOME:<name>` | "Welcome &lt;name&gt;" |
+| `ST:MENU:<name>` | The 1-5 menu |
+| `ST:BALANCE:<n>` | "Your balance: EGP n" |
+| `ST:DISPENSE:<n>` | "Dispensing EGP n" + cash animation |
+| `ST:DEPOSIT:<n>` | "Deposit received: EGP n" |
+| `ST:WRONGPIN:<k>` | "Wrong PIN - k tries left" (amber) |
+| `ST:LOCKED` | "CARD LOCKED" (red) |
+| `ST:PINCHANGED` | "PIN changed successfully" |
+| `ST:THANKS` | "Thank you - please take your card" |
+
+Rules for the firmware:
+
+* **Never wait for a reply to an `ST:` message.** The PC sends nothing back.
+* `ST:PIN` resets the dots to zero, so send it when PIN entry starts.
+* Send `ST:PINDOTS:1`, `:2`, `:3`, `:4` as each digit is pressed.
+* An unknown `ST:` message is logged and ignored; it will not crash anything.
+* If the board sends no `ST:` messages at all, the screen still follows along
+  roughly, because the listener also infers state from `GET`/`TXN`/`LOCK`.
+
+After 60 seconds with nothing arriving, the screen returns to the attract
+screen by itself.
+
+---
+
+## 3. Running it by hand (so you understand it)
 
 ```bash
 cd C:\Users\amrho\Smart_ATM
 ```
 
-**Once only — install the libraries and create the database:**
+Once only:
 
 ```bash
 py -m pip install -r requirements.txt
@@ -115,40 +133,35 @@ py -m pip install -r requirements.txt
 py seed.py
 ```
 
-**Terminal 1 — the bank's website:**
+Terminal 1 - the website:
 
 ```bash
 py app.py
 ```
 
-**Terminal 2 — the bank's ATM link:**
+Terminal 2 - the link to the STM32:
 
 ```bash
-py serial_listener.py --listen
+py serial_listener.py
 ```
 
-**Terminal 3 — a cash machine:**
+Then open **http://localhost:5000/atm** on the projector and
+**http://localhost:5000** for the staff dashboard.
+
+### The COM port
+
+Set at the top of `serial_listener.py`, currently **COM5**:
+
+```python
+SERIAL_PORT = "COM5"
+```
+
+Check yours in **Device Manager -> Ports (COM & LPT)**. Or override it for one
+run:
 
 ```bash
-py atm_gui.py
+py serial_listener.py --port COM7
 ```
-
-Then open **http://localhost:5000** for the staff dashboard.
-
-`atm_sim.py` is the same cash machine as a text menu if you prefer the
-terminal to a window.
-
-### The two port numbers
-
-These are different things, and mixing them up is the easiest mistake to make:
-
-| Port | What it is |
-|---|---|
-| **5000** | The **website**. This is the one you open in a browser. |
-| **5555** | The pretend serial cable between the bank and a cash machine. Never open this in a browser. |
-
-With a real STM32 there is no port 5555 at all — the board is wired to a COM
-port, so you run `py serial_listener.py` with **no** `--listen`.
 
 ### Why `py` and not `python`?
 
@@ -159,14 +172,9 @@ Python was not found; run without arguments to install from the Microsoft Store
 ```
 
 `py` is the official Windows Python Launcher and does not have this problem.
-
-**To fix `python` properly** (optional):
-
-> **Settings → Apps → Advanced app settings → App execution aliases**
-> → turn **off** `python.exe` and `python3.exe`.
-
-Then close and reopen your terminal — PATH and alias changes only affect
-**newly opened** terminals, which is the usual reason a fix "doesn't work".
+To fix `python` properly: **Settings -> Apps -> Advanced app settings -> App
+execution aliases**, turn **off** `python.exe` and `python3.exe`, then open a
+**new** terminal.
 
 ---
 
@@ -180,7 +188,7 @@ A real-time mirror of what the STM32 is doing:
 
 | Panel shows | Triggered by | Colour |
 |---|---|---|
-| `IDLE` — waiting for card | nothing for 25 seconds | grey |
+| `IDLE` — waiting for card | nothing for 60 seconds | grey |
 | `CARD INSERTED` — awaiting PIN | a `GET` for a known, open card | blue |
 | `UNKNOWN CARD` | a `GET` that returns `NONE` | amber |
 | `CARD BLOCKED` | a `GET` for a card with `locked = 1` | red |
@@ -375,114 +383,33 @@ py seed.py
 
 ---
 
-## 8. Testing the whole thing with **no STM32**
+## 8. The retired software ATM
 
-Four ways, easiest first. All of them make the dashboard and the live monitor
-react exactly as the real board would.
+Earlier versions had `atm_gui.py` / `atm_sim.py`: a self-contained software
+ATM with a working on-screen keypad, which connected to the listener over a
+socket on port 5555.
 
-### Option A — manual mode (nothing to install)
+**That is retired.** The real STM32 is now the only ATM, and the PC screen is
+just a mirror of it. The files are still in the folder so you can see how it
+worked, but nothing launches them and the demo does not use them.
+
+If you ever want to run the old software ATM again:
 
 ```bash
-py serial_listener.py --manual
+py serial_listener.py --listen
 ```
-
-You get an `STM32>` prompt. Type request lines yourself:
-
-```
-STM32> GET:A1B2C3D4
-  RX <- GET:A1B2C3D4
-  TX -> REC:Amro:1234:2000:0
-STM32> TXN:A1B2C3D4:WDR:500:1500
-  TX -> OK
-STM32> GET:FFFFFFFF
-  TX -> NONE
-```
-
-Type `quit` to exit. If you start the listener normally and the COM port cannot
-be opened, it drops into this mode automatically — which is exactly what
-happens when you run `1_BANK.bat` with no board plugged in.
-
-### Option B — the ATM simulator with a window
-
-The full cash-machine experience: an LCD, a keypad, and a card reader.
-
-Terminal 1:
 ```bash
 py atm_gui.py
 ```
 
-Terminal 2:
-```bash
-py serial_listener.py --listen
-```
+That still works, but do not use it for the demo — the mirror screen at
+`/atm` is what the brief asks for.
 
-Click a sample card to "tap" it, type the PIN on the keypad, use the menu.
-`atm_sim.py` is the same thing as a text menu if you prefer the terminal.
+### Checking the data commands by hand
 
-Every decision is made inside the simulator, never on the PC:
-
-| Decision | Made by | Sent to the bank? |
-|---|---|---|
-| Is the card known / blocked? | read from the `GET` reply | — |
-| Is the PIN correct? | compared on the board | **No.** The typed PIN never leaves the ATM |
-| 3 wrong PINs → lock the card | the ATM decides | then `LOCK:<uid>` |
-| Enough money to withdraw? | checked before sending | nothing sent if it fails |
-| What is the new balance? | calculated on the board | sent inside `TXN` |
-
-Watch the `[ATM]` lines: those are the board thinking, with no traffic to the
-bank at all. `atm_core.py` holds these rules and is effectively the
-**specification for the STM32 firmware**.
-
-### Option C — one raw line at a time
-
-```bash
-py fake_stm32.py
-```
-```bash
-py serial_listener.py --listen
-```
-
-Sends exactly what you type and shows exactly what comes back. Best for
-checking a single command or an error case.
-
-### Option D — a virtual COM port pair (closest to real hardware)
-
-Install a virtual null-modem driver that gives you two linked ports —
-[com0com](https://sourceforge.net/projects/com0com/) on Windows (e.g. `COM4`
-linked to `COM5`), or `socat` on Linux.
-
-```bash
-py atm_gui.py --port COM5
-```
-```bash
-py serial_listener.py --port COM4
-```
-
-Now the bytes travel through a real serial driver. When the STM32 arrives,
-nothing changes except the port name.
-
-### Full test script
-
-Paste these to exercise every command and every error path:
-
-```
-GET:A1B2C3D4                  -> REC:Amro:1234:2000:0
-GET:FFFFFFFF                  -> NONE          (unknown card)
-TXN:A1B2C3D4:WDR:500:1500     -> OK
-TXN:A1B2C3D4:DEP:200:1700     -> OK
-GET:A1B2C3D4                  -> REC:Amro:1234:1700:0
-PIN:A1B2C3D4:4321             -> OK
-LOCK:11223344                 -> OK
-GET:11223344                  -> REC:Anas:4321:500:1   (locked = 1)
-TXN:FFFFFFFF:WDR:100:0        -> ERR           (no such card)
-TXN:A1B2C3D4:XYZ:100:1600     -> ERR           (bad type)
-TXN:A1B2C3D4:WDR:abc:1600     -> ERR           (bad number)
-PIN:A1B2C3D4:12               -> ERR           (PIN must be 4 digits)
-HELLO                         -> ERR           (unknown command)
-GET:A1B2C3D4:extra            -> ERR           (wrong field count)
-```
-
-Keep http://localhost:5000 on screen while you do this.
+`fake_stm32.py` sends one raw protocol line and shows the reply. Manual mode
+in the listener (`py serial_listener.py --manual`) does the same thing without
+needing a second program, and is usually easier.
 
 ---
 
@@ -547,8 +474,38 @@ nothing is arriving on the port.
 **Port 5000 already in use** — an old copy is still running. Run
 `STOP.bat`, or change the last line of `app.py` to `port=5001`.
 
-**`Port 5555 is already in use`** from a simulator — another `atm_gui.py`,
-`atm_sim.py` or `fake_stm32.py` is still open. Close it and try again.
+**The ATM screen shows NO LINK** — the website stopped. Check the
+"AAST Bank - Website" window, or run `DEMO.bat` again.
 
 **DB Browser says "database is locked"** — close the two app windows, make
 your edit, click Write Changes, then start the app again. See §7.
+
+---
+
+## 11. What each file does
+
+| File | What it does |
+|---|---|
+| `app.py` | The Flask website: the `/atm` mirror screen, the staff dashboard, and the JSON APIs they poll. |
+| `serial_listener.py` | The UART loop. The 4 data commands **and** the new one-way `ST:` status messages. **COM port constant at the top.** |
+| `database.py` | Every SQLite query. Also turns on WAL mode (see §7). |
+| `admin_cli.py` | The bank staff admin menu. |
+| `seed.py` | Creates `atm.db` with the 3 sample cardholders. |
+| `show_db.py` | Prints the raw database in the terminal, no web server needed. |
+| `templates/atm_screen.html` | **The big ATM mirror screen.** Display only. |
+| `templates/dashboard.html` | The staff operations dashboard. |
+| `templates/admin.html` | Optional web admin page (the CLI is the primary one). |
+| `static/atm.css` | The green-screen ATM look. |
+| `static/style.css` | The navy/blue bank theme for the dashboard. |
+| `DEMO.bat` / `ADMIN.bat` / `STOP.bat` | The launchers. |
+| `atm.db` | The database file (created by `seed.py`). |
+| `atm_gui.py`, `atm_sim.py`, `atm_core.py`, `fake_stm32.py` | The **retired** software ATM (see §8). Kept for reference; not used by the demo. |
+
+### Where the "no banking logic on the PC" rule lives
+
+* `serial_listener.py` stores the balance the STM32 sends. It never adds or
+  subtracts anything.
+* There is no PIN check anywhere on the PC. The board compares the PIN itself
+  and only tells us the outcome (`ST:WRONGPIN:2`, or a `LOCK:` command).
+* `templates/atm_screen.html` has no buttons, inputs or forms at all — you can
+  verify that by searching the file.
